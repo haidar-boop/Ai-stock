@@ -198,12 +198,26 @@ def compute_features(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = N
     d["rng_lo"] = d["low"].rolling(cfg.range_len).min()
     d["rng_w"] = (d["rng_hi"] - d["rng_lo"]) / d["rng_lo"] * 100
 
-    # higher timeframe, aligned as-of (previous closed HTF bar -> no lookahead)
+    # ---- higher timeframe: strictly no lookahead -----------------------------
+    # Yahoo stamps an HTF bar at the START of its period (a weekly bar dated Mon
+    # closes on Fri). Offsetting that timestamp by a token amount therefore lands
+    # INSIDE the bar and leaks the rest of the week into every day of it.
+    #
+    # An HTF bar is only knowable once it has completed, i.e. from the start of
+    # the FOLLOWING HTF bar. Mapping each bar to its successor's timestamp gives
+    # exactly that, and matches Pine's request.security(..., close[1],
+    # lookahead_off), which serves the previous *completed* HTF bar.
+    #
+    # The final HTF bar has no successor: it is either still forming or its
+    # availability time is unknown, so it is dropped rather than guessed. That
+    # also removes Yahoo's spurious trailing partial bar from this path.
     if htf is not None and len(htf) > 55:
         h = htf.copy()
         h["sma50"] = h["close"].rolling(50).mean()
         h = h[["dt", "close", "sma50"]].copy()
-        h["dt"] = h["dt"] + pd.Timedelta(seconds=1)  # only usable AFTER the bar closes
+        h["available_from"] = h["dt"].shift(-1)
+        h = h.dropna(subset=["available_from"]).drop(columns=["dt"])
+        h = h.rename(columns={"available_from": "dt"})
         # merge_asof requires identical datetime resolutions on both keys
         tz = "America/New_York"
         left = d.sort_values("dt").copy()
