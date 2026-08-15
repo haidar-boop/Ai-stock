@@ -194,6 +194,7 @@ class Config:
     db_max_sep: int = 90
     retest_tol: float = 1.5
     fb_window: int = 10
+    db_max_hold: int = 126   # bars a broken-out pattern stays live before retiring
     range_len: int = 20
     range_max_w: float = 9.0
     weights: dict = field(default_factory=lambda: {
@@ -457,7 +458,11 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         # than one ATR is noise-triggered and inflates R:R with a fake edge.
         struct_stop = (sup - 0.5 * atrv) if not np.isnan(sup) else px - 2.0 * atrv
         l_stop = min(struct_stop, px - 1.0 * atrv)
-        l_tgt = db_target if (db_armed and not np.isnan(db_target)) else res_target
+        # An armed pattern may only supply the target while that target is still
+        # AHEAD of price. Once price trades through it the measured move is spent,
+        # and using it anyway makes l_rew negative and fails every gate forever.
+        use_db_tgt = db_armed and (not np.isnan(db_target)) and db_target > px
+        l_tgt = db_target if use_db_tgt else res_target
         l_risk = px - l_stop
         l_rew = (l_tgt - px) if not np.isnan(l_tgt) else np.nan
         l_rr = (l_rew / l_risk) if (not np.isnan(l_rew) and l_risk > 0) else np.nan
@@ -556,6 +561,20 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         elif pos == 1 and exit_sig:
             pos, entry, stop, tgt = 0, np.nan, np.nan, np.nan
             entry_armed = False
+
+        # ---- retire a resolved pattern ---------------------------------------
+        # px > db_neck stays true after any rally and db_fail needs a 2% break, so
+        # without this db_armed latches on permanently and pins the target to a
+        # price long since passed. Retirement happens after the exit logic above
+        # so db_fail is still visible to it on this bar.
+        if db_break is not None:
+            reached = (not np.isnan(db_target)) and row["high"] >= db_target
+            timed_out = (i - db_break) > cfg.db_max_hold
+            if reached or timed_out or db_fail:
+                db_neck = db_base = np.nan
+                db_break = None
+                db_retest = False
+                db_fail = False
 
         cols["score"][i] = score
         cols["res"][i], cols["sup"][i] = res, sup

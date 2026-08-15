@@ -70,6 +70,8 @@ dbMinSep   = input.int(15,  "Min bars between the two lows",minval=5, maxval=200
 dbMaxSep   = input.int(90,  "Max bars between the two lows",minval=10,maxval=400, group=grpP)
 retestTol  = input.float(1.5,"Retest tolerance %",         minval=0.1, maxval=10, step=0.1, group=grpP)
 fbWindow   = input.int(10,  "False-breakout window (bars)",minval=3, maxval=50, group=grpP)
+dbMaxHold  = input.int(126, "Bars a broken-out pattern stays live",minval=10, maxval=500, group=grpP,
+     tooltip="After this many bars past the breakout the pattern retires, so a stale measured target cannot pin the trade geometry forever.")
 rangeLen   = input.int(20,  "Range detection window",      minval=5, maxval=200, group=grpP)
 rangeMaxW  = input.float(9.0,"Max range width %",          minval=1, maxval=50, step=0.5, group=grpP)
 
@@ -384,7 +386,11 @@ resTgt  = na(resTgt0) ? close + math.max(2.5 * atrV, needUp) : resTgt0
 // one ATR is noise-triggered and inflates R:R with a fake edge.
 structStop = not na(supLvl) ? supLvl - 0.5 * atrV : close - 2.0 * atrV
 longStop   = math.min(structStop, close - 1.0 * atrV)
-longTgt    = not na(dbTarget) and dbArmed ? dbTarget : resTgt
+// An armed pattern may only supply the target while that target is still AHEAD
+// of price. Once price trades through it the measured move is spent, and using
+// it anyway makes longRew negative and fails every gate from then on.
+useDbTgt   = dbArmed and not na(dbTarget) and dbTarget > close
+longTgt    = useDbTgt ? dbTarget : resTgt
 longRisk   = close - longStop
 longRew    = not na(longTgt) ? longTgt - close : na
 longRR     = not na(longRew) and longRisk > 0 ? longRew / longRisk : na
@@ -477,6 +483,29 @@ else if (posState == 1 and exitLong) or (posState == -1 and exitShort)
     stopPx   := na
     tgtPx    := na
     entryArmed := false
+
+// ---------------------------------------------------------------------------
+// Retire a resolved pattern. close > dbNeck stays true after any rally and
+// dbFail needs a 2% break, so without this dbArmed latches on permanently and
+// pins the target to a price long since passed. Runs after the exit block above
+// so dbFail is still visible to it on this bar.
+if not na(dbBreak)
+    dbReached = not na(dbTarget) and high >= dbTarget
+    if dbReached or (bar_index - dbBreak > dbMaxHold) or dbFail
+        dbNeck   := na
+        dbBase   := na
+        dbBreak  := na
+        dbRetest := false
+        dbFail   := false
+
+if not na(dtBreak)
+    dtReached = not na(dtNeck) and not na(dtBase) and low <= dtNeck - (dtBase - dtNeck)
+    if dtReached or (bar_index - dtBreak > dbMaxHold) or dtFail
+        dtNeck   := na
+        dtBase   := na
+        dtBreak  := na
+        dtRetest := false
+        dtFail   := false
 
 // blocking reason (for the dashboard)
 blockReason = longRaw or shortRaw ? "-"

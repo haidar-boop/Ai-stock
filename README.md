@@ -16,17 +16,19 @@ including the one that undercuts the tool:
 
 | Test | Basket | Trades | Edge vs random entry | p-value | Verdict |
 |---|---|---|---|---|---|
-| In-sample | Tech / energy (the design basket) | 134 | **+1.582 pp/trade** (+2.82 sd) | **0.005** | Entry adds signal |
-| **Out-of-sample** | **14 names never used to design the rules** | **144** | **+0.069 pp/trade** (+0.20 sd) | **0.367** | **No demonstrable edge** |
+| In-sample | Tech / energy (the design basket) | 155 | **+1.549 pp/trade** (+2.91 sd) | **<0.003** | Entry adds signal |
+| **Out-of-sample** | **14 names never used to design the rules** | **168** | **−0.057 pp/trade** (−0.18 sd) | **0.573** | **Slightly worse than random** |
 
-> Regenerated after four rounds of correctness fixes (see *Corrections*). The out-of-sample figure
-> after each round: **+0.206 → +0.014 → +0.245 → +0.069 pp/trade**. Every one of those is inside
-> noise, and the swing between them is larger than the quantity being measured. **At n ≈ 144 this
-> measurement cannot distinguish the engine from random entry**, and no round has changed that.
+> Regenerated after five rounds of correctness fixes (see *Corrections*). The out-of-sample figure
+> after each round: **+0.206 → +0.014 → +0.245 → +0.069 → −0.057 pp/trade**. It has now crossed
+> zero and sits **slightly below random entry**. Every reading is inside noise and the swing
+> between them exceeds the quantity being measured, so the defensible summary is simply: **on
+> symbols the rules were not built on, this engine's entry timing is worth nothing.** Five rounds
+> of bug fixing did not change that, and the current best estimate is marginally negative.
 
 **The in-sample edge did not survive out-of-sample.** The rules were tuned on the design basket,
-so the in-sample p-value is optimistically biased. Out-of-sample, **p = 0.367 at 0.20 standard
-deviations is indistinguishable from random entry**. The honest reading is:
+so the in-sample p-value is optimistically biased. Out-of-sample the engine now returns **less
+than random entry** (+0.240% vs +0.296% per trade). The honest reading is:
 
 - There is **no proven entry-timing alpha** on symbols the rules were not built on.
 - The holdout was mostly low-beta defensives (JNJ, PG, KO, VZ…), while the design basket was
@@ -40,23 +42,24 @@ One more result worth internalising:
 ```
                  in-sample            out-of-sample
               engine   random       engine   random
-mean/trade   +2.699%  +1.118%      +0.361%  +0.292%
-win rate       46.3%    51.3%        31.2%    44.7%   <-- engine wins LESS often, both times
+mean/trade   +2.738%  +1.189%      +0.240%  +0.296%   <-- OOS: BELOW random
+win rate       45.2%    49.9%        29.8%    43.6%   <-- engine wins LESS often, both times
 ```
 
-**The engine wins less often than random entry in both baskets** — by 7.7 and 14.1 points. It is
+**The engine wins less often than random entry in both baskets** — by 4.7 and 13.8 points. It is
 a low-hit-rate, large-win profile, and the trade ledger shows exactly that:
 
 | Exit reason | n | Median | Mean |
 |---|---|---|---|
-| target | 44 | **+10.02%** | +10.53% |
-| stop | 57 | −2.33% | −3.24% |
-| degraded (score collapsed) | 27 | −1.06% | −0.58% |
+| target | 52 | **+10.27%** | +11.21% |
+| stop | 69 | −2.44% | −3.33% |
+| degraded (score collapsed) | 28 | −1.21% | −0.61% |
 | extended (stretched, volume fading) | 7 | +3.53% | +3.63% |
 
-Profit factor 2.31; average win +9.43% against average loss −2.72%. **The median trade is negative
-in both baskets** — 42% of trades stop out and the mean is carried entirely by the 33% that reach
-target. If you cannot sit through that, this tool will feel broken while working as designed.
+**The median trade is negative in both baskets** — 44% of trades stop out and the mean is carried
+entirely by the 33% that reach target. In the design basket that arithmetic comes out positive; on
+unseen symbols it does not. If you cannot sit through a sub-50% hit rate, this tool will feel
+broken while working as designed.
 
 Reproduce any of this yourself:
 
@@ -240,9 +243,16 @@ entries had been handicapped. The random baseline rose from +0.878% to +1.118% p
 in-sample, and the out-of-sample edge fell from +0.245 pp back to **+0.069 pp**. This is why the
 measuring tool was fixed before any further behavioural change.
 
-*(Known interaction: `plan_target` sits at or below price on ~10.5% of bars — 19.1% on TSLA —
-because of the stale `db_armed` target in open issue #1. `simulate()` guards this with an ATR
-fallback, but it is a symptom of a real bug, not a clean result.)*
+**2026-08-15 — stale armed patterns (fixed).** `db_armed` never expired. `price > neckline` stays
+true after any rally and the failure test needs a 2% break, so once armed the flag latched on
+permanently and pinned the trade target to a measured move price had long since passed. The
+planned target sat **at or below price on ~10.5% of bars — 19.1% on TSLA**, making reward negative
+and failing every gate from then on: the engine could brick itself for the rest of a series.
+
+Patterns now retire when the target is reached, when they fail, or after `db_max_hold` (126) bars,
+and an armed pattern may only supply the target while that target is still *ahead* of price.
+Degenerate targets went from **10.5% to 0.00%** across 7,542 bars, and signal counts rose (155
+in-sample, 168 out-of-sample) because the engine is no longer locking itself out.
 
 **Open issues.** An audit found further defects that are *not yet fixed* and that still affect the
 numbers above. Do not treat the current figures as final:
@@ -250,18 +260,16 @@ numbers above. Do not treat the current figures as final:
 1. The retest gate (`low <= neckline * 1.015`) is satisfied ~73% of the time within one bar of the
    breakout, so the engine largely signals on the breakout itself. **The headline design
    principle is not meaningfully implemented.**
-2. An armed double-bottom never expires, so after a rally past a stale target the engine can stop
-   signalling permanently.
-3. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
+2. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
    position reversals emit no exit, the double-top detector lacks the double-bottom's pair-wise
    matching and staleness expiry, and the EXIT marker fires one bar late.
 
 ## Known limitations
 
-- **No demonstrated out-of-sample entry edge.** See above. Use it as a discipline framework —
-  it enforces volatility-aware targets, R:R minimums, structural stops, and regime awareness —
-  rather than as a source of alpha.
-- **Small samples.** 134 in-sample and 144 out-of-sample trades. Both are too small for strong
+- **No out-of-sample entry edge — the current estimate is slightly negative.** See above. Use it
+  as a discipline framework (it enforces volatility-aware targets, R:R minimums, structural stops
+  and regime awareness), not as a source of alpha.
+- **Small samples.** 155 in-sample and 168 out-of-sample trades. Both are too small for strong
   conclusions in either direction.
 - **Backtests exclude commissions, slippage, and spread**, which would reduce every result.
 - **Bull-market window.** The 10-year study period was mostly a bull market; random entries alone

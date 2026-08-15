@@ -106,5 +106,17 @@ check("a gap through the stop fills at the open, not the stop",
 check("a gap through a target fills at the open, not the target",
       max(_d["open"].iloc[3], 95.5) == 96.0)
 
-print("\nRESULT (with fills):", "all clear" if fails == 0 else f"{fails} FAILURE(S)")
+
+print("8. an armed pattern retires instead of pinning a stale target")
+from cse.engine import run as _run, fetch as _fetch
+_deg = _tot = 0
+for _s in ("AAPL", "TSLA", "NVDA"):
+    _d = _run(_fetch(_s, "10y", "1d"), Config(), htf=_fetch(_s, "10y", "1wk"))
+    _m = _d["plan_target"].notna() & _d["close"].notna()
+    _deg += int(((_d["plan_target"] <= _d["close"]) & _m).sum())
+    _tot += int(_m.sum())
+check("planned target is never at or below price",
+      _deg == 0, f"{_deg}/{_tot} degenerate (was ~10.5% before retirement)")
+
+print("\nRESULT (full suite):", "all clear" if fails == 0 else f"{fails} FAILURE(S)")
 sys.exit(1 if fails else 0)
