@@ -57,6 +57,8 @@ hvSuppress = input.int(90,  "Suppress above HV percentile",minval=50, maxval=100
      tooltip="No signals when 20-bar historical volatility is above this percentile of its own 1y range.")
 coolDown   = input.int(10,  "Cooldown bars between signals",minval=0, maxval=100, group=grpS)
 useVolConf = input.bool(true,"Require volume confirmation", group=grpS)
+enableShorts = input.bool(false, "Enable SHORT signals (UNVALIDATED)", group=grpS,
+     tooltip="Off by default. The Python mirror used for all published backtests implements no short side, so the short path has never been scored against random entry. Separately, downside range breaks failed 61.8% of the time in the pattern study. Treat any SELL as experimental.")
 
 grpT = "Technical Parameters"
 pivLen     = input.int(5,   "Pivot lookback",              minval=2, maxval=20, group=grpT)
@@ -178,13 +180,16 @@ structDn = isLH and isLL
 
 // --- rolling pivot arrays for adaptive S/R ---------------------------------
 var array<float> phArr = array.new<float>()
+var array<int>   phBarArr = array.new<int>()
 var array<float> plArr = array.new<float>()
 var array<int>   plBarArr = array.new<int>()
 maxLvls = 40
 if not na(ph)
     array.push(phArr, ph)
+    array.push(phBarArr, bar_index - pivLen)
     if array.size(phArr) > maxLvls
         array.shift(phArr)
+        array.shift(phBarArr)
 if not na(pl)
     array.push(plArr, pl)
     array.push(plBarArr, bar_index - pivLen)
@@ -244,6 +249,7 @@ var float dtBase   = na
 var int   dtBreak  = na
 var bool  dtRetest = false
 var bool  dtFail   = false
+var int   dtBorn   = -100000
 
 // --- detect a fresh double bottom on each new confirmed pivot low ----------
 // Compare the new pivot low against the LAST SEVERAL pivot lows, not only the
@@ -259,7 +265,12 @@ if not na(pl) and array.size(plArr) >= 2
             pb  = array.get(plBarArr, k)
             sep = curBar - pb
             if sep <= dbMaxSep and sep >= dbMinSep and math.abs(pl - pv) / pv * 100 <= dbTol
-                nk = ta.highest(high, math.min(math.max(sep + pivLen, 1), 400))
+                // ta.highest() cannot be called here: ta.* must run on every bar
+                // to maintain state. high[k] is plain historical referencing and
+                // is safe inside conditionals. Scans pb .. current pivot bar.
+                float nk = high[pivLen]
+                for q = pivLen to math.min(bar_index - pb, dbMaxSep + pivLen)
+                    nk := math.max(nk, high[q])
                 bs = math.min(pl, pv)
                 if not na(nk) and (nk - bs) / bs * 100 >= 5.0
                     dbNeck  := nk
@@ -270,18 +281,30 @@ if not na(pl) and array.size(plArr) >= 2
                     dbBorn  := bar_index
                 matched := 1
 
-if not na(ph) and not na(ph2) and not na(ph2Bar)
-    sepT = ph1Bar - ph2Bar
-    withinT = math.abs(ph1 - ph2) / ph2 * 100 <= dbTol
-    if withinT and sepT >= dbMinSep and sepT <= dbMaxSep
-        nkT = ta.lowest(low, math.min(math.max(sepT + pivLen, 1), 400))
-        bsT = math.max(ph1, ph2)
-        if not na(nkT) and (bsT - nkT) / nkT * 100 >= 5.0
-            dtNeck  := nkT
-            dtBase  := bsT
-            dtBreak := na
-            dtRetest:= false
-            dtFail  := false
+// Mirror of the bullish detector: pair-wise matching against the last several
+// pivot highs (not consecutive-only), same explicit scan for the neckline, and
+// a dtBorn stamp so an un-broken pattern can go stale.
+if not na(ph) and array.size(phArr) >= 2
+    curBarT = bar_index - pivLen
+    int matchedT = 0
+    for k = array.size(phArr) - 2 to math.max(0, array.size(phArr) - 8) by -1
+        if matchedT == 0
+            pvT  = array.get(phArr, k)
+            pbT  = array.get(phBarArr, k)
+            sepT = curBarT - pbT
+            if sepT <= dbMaxSep and sepT >= dbMinSep and math.abs(ph - pvT) / pvT * 100 <= dbTol
+                float nkT = low[pivLen]
+                for q = pivLen to math.min(bar_index - pbT, dbMaxSep + pivLen)
+                    nkT := math.min(nkT, low[q])
+                bsT = math.max(ph, pvT)
+                if not na(nkT) and (bsT - nkT) / nkT * 100 >= 5.0
+                    dtNeck  := nkT
+                    dtBase  := bsT
+                    dtBreak := na
+                    dtRetest:= false
+                    dtFail  := false
+                    dtBorn  := bar_index
+                matchedT := 1
 
 // --- breakout / retest / failure bookkeeping -------------------------------
 // A pattern that never breaks out goes stale; drop it rather than let an old
@@ -289,6 +312,9 @@ if not na(ph) and not na(ph2) and not na(ph2Bar)
 if not na(dbNeck) and na(dbBreak) and bar_index - dbBorn > dbMaxSep * 2
     dbNeck := na
     dbBase := na
+if not na(dtNeck) and na(dtBreak) and bar_index - dtBorn > dbMaxSep * 2
+    dtNeck := na
+    dtBase := na
 if not na(dbNeck) and na(dbBreak) and close > dbNeck
     dbBreak := bar_index
 if not na(dbBreak)
@@ -405,8 +431,23 @@ longRisk   = close - longStop
 longRew    = not na(longTgt) ? longTgt - close : na
 longRR     = not na(longRew) and longRisk > 0 ? longRew / longRisk : na
 
-shortStop  = not na(resLvl) ? resLvl + 0.5 * atrV : close + 2.0 * atrV
-shortTgt   = supLvl
+// Short side mirrors the long side. Previously it used the merely-NEAREST
+// support as its target, which sits ~0.2 sigma from price by construction and
+// so could never clear gateNoiseS -- the SELL path was effectively dead code.
+f_targetBelow(arr, px, need) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if px - v >= need and (na(best) or v > best)
+                best := v
+    best
+supTgt0    = f_targetBelow(plArr, close, needUp)
+supTgt     = na(supTgt0) ? close - math.max(2.5 * atrV, needUp) : supTgt0
+// and the same 1-ATR floor, so a nearby pivot high cannot inflate short R:R
+structStopS = not na(resLvl) ? resLvl + 0.5 * atrV : close + 2.0 * atrV
+shortStop  = math.max(structStopS, close + 1.0 * atrV)
+shortTgt   = not na(dtNeck) and not na(dtBase) and dtArmed and (dtNeck - (dtBase - dtNeck)) < close ? dtNeck - (dtBase - dtNeck) : supTgt
 shortRisk  = shortStop - close
 shortRew   = not na(shortTgt) ? close - shortTgt : na
 shortRR    = not na(shortRew) and shortRisk > 0 ? shortRew / shortRisk : na
@@ -442,7 +483,8 @@ var int lastSigBar = -1000
 coolOK = bar_index - lastSigBar >= coolDown
 
 longRaw  = gateNoiseL and gateRRL and gateScoreL and gateVol and gateVolume and gateSetupL and coolOK
-shortRaw = gateNoiseS and gateRRS and gateScoreS and gateVol and gateVolume and gateSetupS and coolOK
+shortRaw = enableShorts and gateNoiseS and gateRRS and gateScoreS and gateVol and gateVolume
+     and gateSetupS and coolOK
 
 // position state so EXIT only fires when something is open
 var int  posState  = 0        // 1 long, -1 short, 0 flat
@@ -473,6 +515,14 @@ exitShortTgt = posState == -1 and not na(tgtPx)  and low <= tgtPx and not exitSh
 exitShortDeg = posState == -1 and (score > 0 or (entryArmed and dtFail))
 exitShort    = exitShortStop or exitShortTgt or exitShortDeg
 
+// A reversal closes the open trade too. Previously longSig fired while a short
+// was open, took the first branch, and overwrote the position silently -- no
+// EXIT marker, no exit alert, so an alert user saw a BUY with no preceding
+// close. tradeClosed is computed BEFORE the state update and is un-lagged, so
+// the marker and alert fire on the bar the trade actually closes.
+tradeClosed = (posState == 1  and (exitLong  or shortSig))
+     or (posState == -1 and (exitShort or longSig))
+
 if longSig
     posState := 1
     entryPx  := close
@@ -487,7 +537,7 @@ else if shortSig
     tgtPx    := shortTgt
     entryArmed := setupBreakdown
     lastSigBar := bar_index
-else if (posState == 1 and exitLong) or (posState == -1 and exitShort)
+else if tradeClosed
     posState := 0
     entryPx  := na
     stopPx   := na
@@ -556,7 +606,7 @@ plotshape(showLabels and longSig,  title="BUY",  style=shape.labelup,
 plotshape(showLabels and shortSig, title="SELL", style=shape.labeldown,
      location=location.abovebar, color=color.new(color.red, 0),
      textcolor=color.white, text="SELL", size=size.small)
-plotshape(showLabels and posState == 0 and (exitLong[1] or exitShort[1]), title="EXIT",
+plotshape(showLabels and tradeClosed, title="EXIT",
      style=shape.xcross, location=location.abovebar, color=color.new(color.orange, 0),
      size=size.tiny)
 
@@ -646,6 +696,6 @@ if showDash and barstate.islast
 // ============================================================================
 alertcondition(longSig,  "CSE Buy",  "CSE BUY {{ticker}} @ {{close}}")
 alertcondition(shortSig, "CSE Sell", "CSE SELL {{ticker}} @ {{close}}")
-alertcondition(posState == 0 and (exitLong[1] or exitShort[1]), "CSE Exit", "CSE EXIT {{ticker}} @ {{close}}")
+alertcondition(tradeClosed, "CSE Exit", "CSE EXIT {{ticker}} @ {{close}}")
 alertcondition(not na(dbBreak) and dbFail and not dbFail[1], "CSE Pattern Failure",
      "CSE pattern FAILED {{ticker}} - neckline lost")

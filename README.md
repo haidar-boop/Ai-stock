@@ -174,6 +174,7 @@ pine/confluence_signal_engine.pine   the TradingView indicator (the deliverable)
 python/cse/engine.py                 bar-for-bar Python mirror of the Pine logic
 python/test_no_lookahead.py          regression guard: no HTF future data
 python/test_data_layer.py            regression guard: data-handling correctness
+python/lint_pine.py                  static checks for the Pine file (it cannot be compiled here)
 python/research_retest_decomposition.py  evidence that retracted the retest gate
 python/validate.py                   signal stats vs per-symbol baselines
 python/randomization_test.py         engine entries vs random entries
@@ -277,12 +278,34 @@ I did **not** replace it with a new rule mined from the same data — that is ho
 overfitting happened. Removing it raised the in-sample edge to +1.929 pp/trade and left the
 out-of-sample figure unchanged at ≈ zero.
 
-**Open issues.** An audit found further defects that are *not yet fixed* and that still affect the
-numbers above. Do not treat the current figures as final:
+**2026-08-15 — Pine parity (fixed).** The indicator's short side and exit reporting had drifted
+from the long side:
 
-1. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
-   position reversals emit no exit, the double-top detector lacks the double-bottom's pair-wise
-   matching and staleness expiry, and the EXIT marker fires one bar late.
+- **`ta.*` inside conditionals.** The neckline used `ta.highest()` / `ta.lowest()` inside `if`/`for`
+  blocks. Pine's `ta.*` functions must execute on *every* bar to maintain internal state; called
+  conditionally they silently return wrong values. Both are now explicit `high[k]` / `low[k]`
+  scans, which are safe anywhere.
+- **Short target/stop.** The short path used the merely-*nearest* support as its target — the same
+  self-defeating choice fixed on the long side, which sits ~0.2σ from price by construction and so
+  could never clear the noise gate. The SELL path was effectively dead code. It now uses a
+  noise-clearing target and the matching 1-ATR stop floor.
+- **Double-top detector.** Now uses the same pair-wise pivot matching as the double bottom
+  (consecutive-only matching missed any pattern with an intervening pivot) and the same staleness
+  expiry.
+- **Reversals emitted no exit.** A BUY firing while a short was open overwrote the position
+  silently — no EXIT marker, no exit alert. An alert user saw a BUY with no preceding close.
+- **EXIT marker fired one bar late**, because it read `exitLong[1]` *after* `posState` had already
+  been reset. Both marker and alert are now un-lagged.
+
+**Short signals are now OFF by default.** The Python mirror implements no short side, so the short
+path has never been scored against random entry — every published figure here is long-only. Turning
+shorts on is opting into an unvalidated signal.
+
+`python/lint_pine.py` statically checks the error classes above (plus comma-chained declarations,
+use-before-declaration, bracket balance), since Pine only compiles inside TradingView.
+
+**Open issues.** None outstanding from the audit. The remaining known risk is that
+**the Pine file has still never been compiled** — see *Known limitations*.
 
 ## Known limitations
 
@@ -296,8 +319,10 @@ numbers above. Do not treat the current figures as final:
   returned +0.96%/trade. Bearish regimes are under-represented.
 - **Pivot lag.** Structure confirms `pivLen` bars late by construction. This is inherent to pivot
   detection, not a bug, but it means levels appear after the fact.
-- **Not compiled in CI.** The Pine file was written and hand-reviewed but not compiled — Pine only
-  compiles inside TradingView. Report any compile error and it will be fixed.
+- **Not compiled in CI.** The Pine file is hand-reviewed and passes `python/lint_pine.py`, but
+  Pine only compiles inside TradingView, so it has never been run. This is the largest unretired
+  risk in the repository. Report any compile error and it will be fixed.
+- **The short path is unvalidated** and disabled by default. All published figures are long-only.
 - Yahoo Finance data has known defects (spurious partial weekly bars, occasional duplicated
   volume, missing volume, and WTI's negative 2020-04-20 print). All of these are now handled in
   `engine.py` and pinned by `python/test_data_layer.py`; see `docs/METHODOLOGY.md` for detail.
