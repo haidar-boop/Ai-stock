@@ -19,14 +19,16 @@ including the one that undercuts the tool:
 | In-sample | Tech / energy (the design basket) | 135 | **+1.738 pp/trade** (+3.65 sd) | **<0.003** | Entry adds signal |
 | **Out-of-sample** | **14 names never used to design the rules** | **146** | **+0.245 pp/trade** (+0.88 sd) | **0.183** | **Not significant** |
 
-> These figures were regenerated after fixing a higher-timeframe **lookahead bug** that
-> contaminated all previously published numbers (see *Corrections* below). The in-sample figure
-> barely moved; the out-of-sample edge collapsed from +0.206 pp to **+0.014 pp — 0.04 standard
-> deviations, indistinguishable from random entry.**
+> Regenerated after three rounds of correctness fixes — a higher-timeframe **lookahead bug**,
+> five **data-layer defects**, and **asymmetric backtest fills** (all detailed under *Corrections*).
+> The out-of-sample figure has moved with each round: **+0.206 → +0.014 → +0.245 pp/trade**. That
+> instability across bug fixes is itself the point — at n ≈ 146 this measurement is not stable
+> enough to call an edge.
 
 **The in-sample edge did not survive out-of-sample.** The rules were tuned on the design basket,
-so the in-sample p-value is optimistically biased. Out-of-sample the edge is **not merely
-insignificant, it is ~zero**. The honest reading is:
+so the in-sample p-value is optimistically biased. Out-of-sample, **p = 0.183 is not significant**
+— 0.88 standard deviations is well inside noise, and it must not be read as an edge. The honest
+reading is:
 
 - There is **no proven entry-timing alpha** on symbols the rules were not built on.
 - The holdout was mostly low-beta defensives (JNJ, PG, KO, VZ…), while the design basket was
