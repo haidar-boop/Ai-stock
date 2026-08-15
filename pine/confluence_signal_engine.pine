@@ -259,7 +259,9 @@ var int   dtBorn   = -100000
 if not na(pl) and array.size(plArr) >= 2
     curBar = bar_index - pivLen
     int matched = 0
-    for k = array.size(plArr) - 2 to math.max(0, array.size(plArr) - 8) by -1
+    // counts DOWN automatically because `from` > `to`; an explicit negative
+    // step is a runtime error in Pine (RE10021)
+    for k = array.size(plArr) - 2 to math.max(0, array.size(plArr) - 8)
         if matched == 0
             pv  = array.get(plArr, k)
             pb  = array.get(plBarArr, k)
@@ -287,7 +289,8 @@ if not na(pl) and array.size(plArr) >= 2
 if not na(ph) and array.size(phArr) >= 2
     curBarT = bar_index - pivLen
     int matchedT = 0
-    for k = array.size(phArr) - 2 to math.max(0, array.size(phArr) - 8) by -1
+    // counts DOWN automatically because `from` > `to` (see note above)
+    for k = array.size(phArr) - 2 to math.max(0, array.size(phArr) - 8)
         if matchedT == 0
             pvT  = array.get(phArr, k)
             pbT  = array.get(phBarArr, k)

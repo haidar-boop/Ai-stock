@@ -7,6 +7,8 @@ have actually bitten this file, before a paste-and-see round trip:
   1. `ta.*` calls inside an indented (conditional/loop) block. Pine's ta.*
      functions must execute on EVERY bar to maintain internal state; calling
      them conditionally silently yields wrong values.
+  1b. Negative `for ... by` steps. Pine requires a positive step and counts down
+     automatically when `from` > `to`; `by -1` raises RE10021 at runtime.
   2. Comma-chained `var` declarations and multi-assignment lines, which are not
      valid Pine (`var float a = na, var float b = na`).
   3. Identifiers used before they are declared at global scope.
@@ -64,6 +66,13 @@ for i, ln in enumerate(lines, 1):
     indented = len(body) - len(body.lstrip()) > 0
     if indented and re.search(r"\bta\.\w+\s*\(", body):
         problems.append(f"{i}: ta.* called inside an indented block — must run every bar: {body.strip()[:70]}")
+
+# --- 1b. negative loop step (Pine runtime error RE10021) ---------------------
+for i, ln in enumerate(lines, 1):
+    body = strip_code(ln)
+    if re.search(r"\bby\s+-", body):
+        problems.append(f"{i}: negative loop step — Pine requires `by` > 0 and counts "
+                        f"down automatically when from > to (RE10021)")
 
 # --- 2. invalid multi-declaration / multi-assignment -------------------------
 for i, ln in enumerate(lines, 1):
