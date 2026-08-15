@@ -81,6 +81,20 @@ if dyn and "max_bars_back" not in code_all:
     problems.append(f"dynamic historical index ({sorted(set(dyn))[:3]}) without "
                     f"max_bars_back in indicator() — Pine may fail to infer the buffer")
 
+# --- 1d. every for-loop must be provably ASCENDING ---------------------------
+# Pine raises RE10021 whenever the implied step is not positive. Requiring the
+# loop to start at a numeric literal (0 or 1) and count up makes direction
+# obvious by inspection instead of depending on Pine's descending behaviour.
+for i, ln in enumerate(lines, 1):
+    body = strip_code(ln)
+    m = re.search(r"\bfor\s+\w+\s*=\s*([^\s].*?)\s+to\s+(.+?)\s*$", body)
+    if not m:
+        continue
+    start = m.group(1).strip()
+    if not re.fullmatch(r"\d+", start):
+        problems.append(f"{i}: for-loop starts at non-literal `{start}` — start at 0/1 and "
+                        f"derive the index, so the loop is provably ascending (RE10021)")
+
 # --- 2. invalid multi-declaration / multi-assignment -------------------------
 for i, ln in enumerate(lines, 1):
     body = strip_code(ln)

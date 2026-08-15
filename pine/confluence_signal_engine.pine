@@ -260,20 +260,25 @@ var int   dtBorn   = -100000
 if not na(pl) and array.size(plArr) >= 2
     curBar = bar_index - pivLen
     int matched = 0
-    // counts DOWN automatically because `from` > `to`; an explicit negative
-    // step is a runtime error in Pine (RE10021)
-    for k = array.size(plArr) - 2 to math.max(0, array.size(plArr) - 8)
+    // STRICTLY ASCENDING: n counts up from 1 and the array index is derived from
+    // it. A descending `for` raises RE10021 ('step' in loop must be greater than
+    // zero), so no loop in this file relies on Pine counting downward.
+    // size >= 2 is guaranteed above, so maxBack >= 1 and the loop is never empty.
+    maxBack = math.min(array.size(plArr) - 1, 7)
+    for n = 1 to maxBack
         if matched == 0
+            k   = array.size(plArr) - 1 - n
             pv  = array.get(plArr, k)
             pb  = array.get(plBarArr, k)
             sep = curBar - pb
             if sep <= dbMaxSep and sep >= dbMinSep and math.abs(pl - pv) / pv * 100 <= dbTol
                 // ta.highest() cannot be called here: ta.* must run on every bar
-                // to maintain state. high[k] is plain historical referencing and
+                // to maintain state. high[] is plain historical referencing and
                 // is safe inside conditionals. Scans pb .. current pivot bar.
                 float nk = high[pivLen]
-                for q = pivLen to math.min(bar_index - pb, dbMaxSep + pivLen)
-                    nk := math.max(nk, high[q])
+                qSpan = math.max(0, math.min(bar_index - pb, dbMaxSep + pivLen) - pivLen)
+                for qOff = 0 to qSpan
+                    nk := math.max(nk, high[pivLen + qOff])
                 bs = math.min(pl, pv)
                 if not na(nk) and (nk - bs) / bs * 100 >= 5.0
                     dbNeck  := nk
@@ -290,16 +295,19 @@ if not na(pl) and array.size(plArr) >= 2
 if not na(ph) and array.size(phArr) >= 2
     curBarT = bar_index - pivLen
     int matchedT = 0
-    // counts DOWN automatically because `from` > `to` (see note above)
-    for k = array.size(phArr) - 2 to math.max(0, array.size(phArr) - 8)
+    // strictly ascending, same construction as the bullish scan above
+    maxBackT = math.min(array.size(phArr) - 1, 7)
+    for n = 1 to maxBackT
         if matchedT == 0
+            k    = array.size(phArr) - 1 - n
             pvT  = array.get(phArr, k)
             pbT  = array.get(phBarArr, k)
             sepT = curBarT - pbT
             if sepT <= dbMaxSep and sepT >= dbMinSep and math.abs(ph - pvT) / pvT * 100 <= dbTol
                 float nkT = low[pivLen]
-                for q = pivLen to math.min(bar_index - pbT, dbMaxSep + pivLen)
-                    nkT := math.min(nkT, low[q])
+                qSpanT = math.max(0, math.min(bar_index - pbT, dbMaxSep + pivLen) - pivLen)
+                for qOff = 0 to qSpanT
+                    nkT := math.min(nkT, low[pivLen + qOff])
                 bsT = math.max(ph, pvT)
                 if not na(nkT) and (bsT - nkT) / nkT * 100 >= 5.0
                     dtNeck  := nkT
