@@ -26,15 +26,27 @@ SYMS = ["NVDA", "AAPL", "CL=F", "USO", "MSFT", "AMZN", "GOOGL", "META",
         "TSLA", "AMD", "SPY", "QQQ", "XOM", "CVX"]
 
 
+HORIZON = 60          # maximum bars held before the time stop
+MIN_TAIL = HORIZON + 1  # bars of future data an entry needs to be eligible
+
+
 def simulate(d: pd.DataFrame, entries: list[int], cfg: Config) -> list[float]:
-    """Apply the engine's exit rules to an arbitrary set of entry bars."""
+    """Apply one fixed set of exit rules to an arbitrary set of entry bars.
+
+    Both real and random entries go through this identical path, so the test
+    isolates ENTRY SELECTION. Trade geometry is read from the engine's per-bar
+    planned stop/target (`plan_stop` / `plan_target`) rather than from the
+    open-position `target` column — the latter is only populated while a trade
+    is live, so a random entry landing on an in-position bar would inherit a
+    different trade's target, computed for a different entry price.
+    """
     c = d["close"].to_numpy()
     hi = d["high"].to_numpy()
     lo = d["low"].to_numpy()
     op = d["open"].to_numpy()
     atrv = d["atr"].to_numpy()
-    sup = d["sup"].to_numpy()
-    tgt_a = d["target"].to_numpy()
+    plan_stop = d["plan_stop"].to_numpy()
+    plan_tgt = d["plan_target"].to_numpy()
     score = d["score"].to_numpy()
     z = d["z20"].to_numpy()
     sk = d["stochk"].to_numpy()
@@ -42,14 +54,22 @@ def simulate(d: pd.DataFrame, entries: list[int], cfg: Config) -> list[float]:
     n = len(d)
     out = []
     for e in entries:
-        if e >= n - 2 or np.isnan(atrv[e]) or np.isnan(c[e]) or c[e] <= 0:
+        # Identical eligibility for real and random entries: an entry must have
+        # the full forward window available. Previously real entries were only
+        # skipped at n-2, so late signals ran on truncated horizons while every
+        # random entry got the full 60 bars — in an upward-drifting basket that
+        # depressed the real mean relative to random.
+        if e >= n - MIN_TAIL or np.isnan(atrv[e]) or np.isnan(c[e]) or c[e] <= 0:
             continue
         px = c[e]
-        struct_stop = (sup[e] - 0.5 * atrv[e]) if not np.isnan(sup[e]) else px - 2.0 * atrv[e]
-        stop = min(struct_stop, px - 1.0 * atrv[e])
-        tgt = tgt_a[e] if not np.isnan(tgt_a[e]) else px + 2.5 * atrv[e]
-        exit_px = c[min(e + 60, n - 1)]           # time stop, matches median holds
-        for j in range(e + 1, min(e + 61, n)):
+        stop = plan_stop[e] if np.isfinite(plan_stop[e]) else px - 1.0 * atrv[e]
+        tgt = plan_tgt[e]
+        if not np.isfinite(tgt) or tgt <= px:      # degenerate/stale target
+            tgt = px + 2.5 * atrv[e]
+        if stop >= px:                             # never a non-adverse stop
+            stop = px - 1.0 * atrv[e]
+        exit_px = c[min(e + HORIZON, n - 1)]       # time stop
+        for j in range(e + 1, min(e + HORIZON + 1, n)):
             degraded = (not np.isnan(score[j])) and score[j] < 0
             extended = (not np.isnan(z[j]) and z[j] > 2.0
                         and not np.isnan(sk[j]) and sk[j] > 90
@@ -96,6 +116,9 @@ def main(iters: int = 500) -> None:
             per_sym.append(dict(sym=s, n=len(r), mean=np.mean(r), median=np.median(r),
                                 win=(np.array(r) > 0).mean() * 100))
 
+    if not real_all:
+        print("  no engine entries survived the eligibility filter — nothing to test")
+        return
     real_mean = float(np.mean(real_all))
     real_win = float((np.array(real_all) > 0).mean() * 100)
     real_med = float(np.median(real_all))
@@ -106,7 +129,7 @@ def main(iters: int = 500) -> None:
         pool: list[float] = []
         for s, d in frames.items():
             valid = np.where(d["score"].notna().to_numpy())[0]
-            valid = valid[valid < len(d) - 61]
+            valid = valid[valid < len(d) - MIN_TAIL]
             if len(valid) == 0 or counts[s] == 0:
                 continue
             e = rng.choice(valid, size=min(counts[s], len(valid)), replace=False)

@@ -314,7 +314,8 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
     entry_armed = False   # was this trade entered on the double-bottom setup?
 
     cols = {k: np.full(n, np.nan) for k in
-            ("score", "res", "sup", "res_sigma", "sup_sigma", "long_rr", "db_neck", "db_target")}
+            ("score", "res", "sup", "res_sigma", "sup_sigma", "long_rr", "db_neck", "db_target",
+             "plan_stop", "plan_target")}
     flags = {k: np.zeros(n, dtype=bool) for k in
              ("long_sig", "short_sig", "exit_sig", "db_armed", "struct_up", "struct_dn", "high_vol")}
     regime_out = np.array(["" for _ in range(n)], dtype=object)
@@ -560,6 +561,8 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         cols["res"][i], cols["sup"][i] = res, sup
         cols["res_sigma"][i], cols["sup_sigma"][i] = res_sig, sup_sig
         cols["long_rr"][i] = l_rr
+        # geometry the engine WOULD use if it entered here — defined on every bar
+        cols["plan_stop"][i], cols["plan_target"][i] = l_stop, l_tgt
         cols["db_neck"][i], cols["db_target"][i] = db_neck, db_target
         flags["long_sig"][i] = long_sig
         flags["exit_sig"][i] = exit_sig

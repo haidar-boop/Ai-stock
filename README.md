@@ -16,19 +16,17 @@ including the one that undercuts the tool:
 
 | Test | Basket | Trades | Edge vs random entry | p-value | Verdict |
 |---|---|---|---|---|---|
-| In-sample | Tech / energy (the design basket) | 135 | **+1.738 pp/trade** (+3.65 sd) | **<0.003** | Entry adds signal |
-| **Out-of-sample** | **14 names never used to design the rules** | **146** | **+0.245 pp/trade** (+0.88 sd) | **0.183** | **Not significant** |
+| In-sample | Tech / energy (the design basket) | 134 | **+1.582 pp/trade** (+2.82 sd) | **0.005** | Entry adds signal |
+| **Out-of-sample** | **14 names never used to design the rules** | **144** | **+0.069 pp/trade** (+0.20 sd) | **0.367** | **No demonstrable edge** |
 
-> Regenerated after three rounds of correctness fixes — a higher-timeframe **lookahead bug**,
-> five **data-layer defects**, and **asymmetric backtest fills** (all detailed under *Corrections*).
-> The out-of-sample figure has moved with each round: **+0.206 → +0.014 → +0.245 pp/trade**. That
-> instability across bug fixes is itself the point — at n ≈ 146 this measurement is not stable
-> enough to call an edge.
+> Regenerated after four rounds of correctness fixes (see *Corrections*). The out-of-sample figure
+> after each round: **+0.206 → +0.014 → +0.245 → +0.069 pp/trade**. Every one of those is inside
+> noise, and the swing between them is larger than the quantity being measured. **At n ≈ 144 this
+> measurement cannot distinguish the engine from random entry**, and no round has changed that.
 
 **The in-sample edge did not survive out-of-sample.** The rules were tuned on the design basket,
-so the in-sample p-value is optimistically biased. Out-of-sample, **p = 0.183 is not significant**
-— 0.88 standard deviations is well inside noise, and it must not be read as an edge. The honest
-reading is:
+so the in-sample p-value is optimistically biased. Out-of-sample, **p = 0.367 at 0.20 standard
+deviations is indistinguishable from random entry**. The honest reading is:
 
 - There is **no proven entry-timing alpha** on symbols the rules were not built on.
 - The holdout was mostly low-beta defensives (JNJ, PG, KO, VZ…), while the design basket was
@@ -42,8 +40,8 @@ One more result worth internalising:
 ```
                  in-sample            out-of-sample
               engine   random       engine   random
-mean/trade   +2.616%  +0.878%      +0.472%  +0.228%
-win rate       45.9%    53.6%        32.2%    46.3%   <-- engine wins LESS often, both times
+mean/trade   +2.699%  +1.118%      +0.361%  +0.292%
+win rate       46.3%    51.3%        31.2%    44.7%   <-- engine wins LESS often, both times
 ```
 
 **The engine wins less often than random entry in both baskets** — by 7.7 and 14.1 points. It is
@@ -225,6 +223,27 @@ Concrete example, AAPL 2026-07-31: the bar opened 304.81, low 300.00, closed 308
 straight through the stop, but `close < stop` was false, so the old code recorded **no loss at
 all**. It now fills at the open.
 
+**2026-08-15 — randomization-test bias (fixed).** The test used to validate everything else was
+itself tilted toward the engine, in two ways:
+
+- **Unequal horizons.** Real entries were only skipped within 2 bars of the series end, so late
+  signals ran on truncated windows, while every random entry was guaranteed the full 60 bars. In
+  an upward-drifting basket that depressed the real mean relative to random. Both paths now share
+  one eligibility rule (`MIN_TAIL = 61`).
+- **Inherited targets.** Random entries read the `target` column, which is only populated *while a
+  trade is live* — so a random entry landing on an in-position bar (6.3% of AAPL's pool) inherited
+  another trade's target, priced off a different entry. The engine now publishes `plan_stop` /
+  `plan_target` on **every** bar, and both real and random entries use that same per-bar geometry.
+
+Correcting the instrument **reduced** the measured edge, which is the expected direction: random
+entries had been handicapped. The random baseline rose from +0.878% to +1.118% per trade
+in-sample, and the out-of-sample edge fell from +0.245 pp back to **+0.069 pp**. This is why the
+measuring tool was fixed before any further behavioural change.
+
+*(Known interaction: `plan_target` sits at or below price on ~10.5% of bars — 19.1% on TSLA —
+because of the stale `db_armed` target in open issue #1. `simulate()` guards this with an ATR
+fallback, but it is a symptom of a real bug, not a clean result.)*
+
 **Open issues.** An audit found further defects that are *not yet fixed* and that still affect the
 numbers above. Do not treat the current figures as final:
 
@@ -233,10 +252,7 @@ numbers above. Do not treat the current figures as final:
    principle is not meaningfully implemented.**
 2. An armed double-bottom never expires, so after a rally past a stale target the engine can stop
    signalling permanently.
-3. The randomization test gives real and random entries different maximum holding windows, and
-   random entries can inherit an open position's target — both bias the comparison toward the
-   engine.
-4. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
+3. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
    position reversals emit no exit, the double-top detector lacks the double-bottom's pair-wise
    matching and staleness expiry, and the EXIT marker fires one bar late.
 
@@ -245,7 +261,7 @@ numbers above. Do not treat the current figures as final:
 - **No demonstrated out-of-sample entry edge.** See above. Use it as a discipline framework —
   it enforces volatility-aware targets, R:R minimums, structural stops, and regime awareness —
   rather than as a source of alpha.
-- **Small samples.** 135 in-sample and 146 out-of-sample trades. Both are too small for strong
+- **Small samples.** 134 in-sample and 144 out-of-sample trades. Both are too small for strong
   conclusions in either direction.
 - **Backtests exclude commissions, slippage, and spread**, which would reduce every result.
 - **Bull-market window.** The 10-year study period was mostly a bull market; random entries alone
