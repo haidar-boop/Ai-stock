@@ -40,7 +40,7 @@ def simulate(d: pd.DataFrame, entries: list[int], cfg: Config) -> list[float]:
     n = len(d)
     out = []
     for e in entries:
-        if e >= n - 2 or np.isnan(atrv[e]) or np.isnan(c[e]):
+        if e >= n - 2 or np.isnan(atrv[e]) or np.isnan(c[e]) or c[e] <= 0:
             continue
         px = c[e]
         struct_stop = (sup[e] - 0.5 * atrv[e]) if not np.isnan(sup[e]) else px - 2.0 * atrv[e]

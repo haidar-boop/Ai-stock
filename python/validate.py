@@ -49,8 +49,11 @@ def trades_from(d: pd.DataFrame) -> pd.DataFrame:
 
 def baseline(d: pd.DataFrame, h: int) -> tuple[float, float]:
     c = d["close"].to_numpy()
-    f = c[h:] / c[:-h] - 1
-    f = f[np.isfinite(f)]
+    a, b = c[:-h], c[h:]
+    ok = np.isfinite(a) & np.isfinite(b) & (a > 0) & (b > 0)
+    f = b[ok] / a[ok] - 1
+    if f.size == 0:
+        return float("nan"), float("nan")
     return float((f > 0).mean()), float(np.median(f) * 100)
 
 

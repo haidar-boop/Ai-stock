@@ -104,7 +104,9 @@ pxSlope = close - close[20]
 obvAgree= (obvSlope > 0) == (pxSlope > 0)
 
 volAvg  = ta.sma(volume, volLen)
-relVol  = volAvg > 0 ? volume / volAvg : 1.0
+// Unusable volume must NOT default to 1.0: that silently PASSES the volume gate.
+// na here means "unknown", and the gate below can then only pass via OBV.
+relVol  = na(volAvg) or volAvg <= 0 ? na : volume / volAvg
 relVol5 = ta.sma(relVol, 5)
 
 logret  = math.log(close / close[1])
@@ -405,7 +407,8 @@ gateScoreS = score <= -shortThr
 // GATE 4: volatility regime not pathological
 gateVol    = not highVol
 // GATE 5: volume confirmation
-gateVolume = not useVolConf or (relVol >= 1.0 or obvAgree)
+volConfirmed = (not na(relVol) and relVol >= 1.0) or obvAgree
+gateVolume = not useVolConf or volConfirmed
 // GATE 6: a qualifying setup must be present
 uptrendCtx       = htfUp or (not na(sma200) and sma50 > sma200)
 setupBreakRetest = dbArmed
@@ -442,7 +445,7 @@ exitLongTgt  = posState == 1 and not na(tgtPx)  and high >= tgtPx
 // ENTERED on that pattern, never an unrelated pullback/range trade.
 exitLongDeg  = posState == 1 and (score < 0 or (entryArmed and dbFail))
 // "extension exit": the fading-volume-into-resistance signature
-exitLongExt  = posState == 1 and z20 > 2.0 and stochK > 90 and relVol5 < 0.8
+exitLongExt  = posState == 1 and z20 > 2.0 and stochK > 90 and not na(relVol5) and relVol5 < 0.8
 exitLong     = exitLongStop or exitLongTgt or exitLongDeg or exitLongExt
 
 exitShortStop= posState == -1 and not na(stopPx) and close > stopPx

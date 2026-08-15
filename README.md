@@ -16,7 +16,7 @@ including the one that undercuts the tool:
 
 | Test | Basket | Trades | Edge vs random entry | p-value | Verdict |
 |---|---|---|---|---|---|
-| In-sample | Tech / energy (the design basket) | 134 | **+1.642 pp/trade** (+3.40 sd) | **<0.003** | Entry adds signal |
+| In-sample | Tech / energy (the design basket) | 134 | **+1.648 pp/trade** (+3.34 sd) | **<0.003** | Entry adds signal |
 | **Out-of-sample** | **14 names never used to design the rules** | **144** | **+0.014 pp/trade** (+0.04 sd) | **0.460** | **No edge whatsoever** |
 
 > These figures were regenerated after fixing a higher-timeframe **lookahead bug** that
@@ -55,6 +55,7 @@ Reproduce any of this yourself:
 cd python
 pip install -r requirements.txt
 python test_no_lookahead.py        # regression guard: HTF must not leak future data
+python test_data_layer.py          # regression guard: data-handling correctness
 python validate.py                 # per-symbol signal stats vs baseline
 python randomization_test.py 400   # in-sample: engine vs random entries
 python holdout_test.py 300         # out-of-sample holdout
@@ -148,6 +149,8 @@ A signal requires **all** of these:
 ```
 pine/confluence_signal_engine.pine   the TradingView indicator (the deliverable)
 python/cse/engine.py                 bar-for-bar Python mirror of the Pine logic
+python/test_no_lookahead.py          regression guard: no HTF future data
+python/test_data_layer.py            regression guard: data-handling correctness
 python/validate.py                   signal stats vs per-symbol baselines
 python/randomization_test.py         engine entries vs random entries
 python/holdout_test.py               out-of-sample check on unseen symbols
@@ -170,6 +173,31 @@ once complete — matching Pine's `request.security(..., close[1], lookahead_off
 already correct. `python/test_no_lookahead.py` guards the regression, including the exact
 failing case. All validation numbers above were regenerated.
 
+**2026-08-15 — data-layer defects (fixed).** Five correctness bugs in data handling, guarded by
+`python/test_data_layer.py`:
+
+- `_clip()` returned the **upper bound** for NaN input (`min(1, nan)` is `1` in Python), so a NaN
+  confluence score became **+100** and cleared the long threshold unconditionally. NaN now
+  propagates, and RSI's zero-average-loss case is defined (100) rather than left NaN.
+- The weekly partial-bar guard **never fired**: Yahoo stamps bars at period start, so the
+  still-forming bar sits a full 7 days after its predecessor and a `< 5` day gap test cannot see
+  it. Now tested against the bar's **final session** (Friday), which also avoids discarding a
+  completed week over the weekend. The off-cycle-duplicate case is still caught separately.
+- CL=F's negative-price row (**−$37.63, 2020-04-20**) was **deleted**, splicing two non-adjacent
+  bars into one fabricated return — the exact artifact `docs/METHODOLOGY.md` warns against. The
+  row is now retained and the affected *returns* are masked as undefined. Max |log return| in the
+  series dropped to 0.320.
+- A single missing volume poisoned **OBV for the entire remaining series** via `cumsum`, and
+  blanked 39 bars of relative volume. Volume is now coerced and zero-filled for OBV, with
+  tolerant `min_periods` on the rolling averages.
+- Pine divergence: `relVol` defaulted to `1.0` when the volume average was unusable, which
+  **passed** the volume gate, while Python's NaN blocked it. Pine now uses `na` and can only pass
+  that gate via OBV agreement — the conservative reading, matching Python.
+
+EWMA variance also now carries forward across undefined returns instead of injecting a zero
+return, which would have understated volatility and *loosened* the noise-floor gate precisely
+where data is least trustworthy.
+
 **Open issues.** An audit found further defects that are *not yet fixed* and that still affect the
 numbers above. Do not treat the current figures as final:
 
@@ -180,14 +208,10 @@ numbers above. Do not treat the current figures as final:
    principle is not meaningfully implemented.**
 3. An armed double-bottom never expires, so after a rally past a stale target the engine can stop
    signalling permanently.
-4. `_clip()` returns the upper bound for NaN input, so a NaN score becomes 100 (maximum bullish).
-5. The weekly partial-bar guard never fires (7-day stamp gap vs a `< 5` day test).
-6. CL=F's negative-price row is deleted rather than masked — the exact splice artifact
-   `docs/METHODOLOGY.md` warns against.
-7. The randomization test gives real and random entries different maximum holding windows, and
+4. The randomization test gives real and random entries different maximum holding windows, and
    random entries can inherit an open position's target — both bias the comparison toward the
    engine.
-8. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
+5. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
    position reversals emit no exit, the double-top detector lacks the double-bottom's pair-wise
    matching and staleness expiry, and the EXIT marker fires one bar late.
 
@@ -206,5 +230,5 @@ numbers above. Do not treat the current figures as final:
 - **Not compiled in CI.** The Pine file was written and hand-reviewed but not compiled — Pine only
   compiles inside TradingView. Report any compile error and it will be fixed.
 - Yahoo Finance data has known defects (spurious partial weekly bars, occasional duplicated
-  volume, and WTI's negative 2020-04-20 print). `engine.py` handles the first; see
-  `docs/METHODOLOGY.md` for the rest.
+  volume, missing volume, and WTI's negative 2020-04-20 print). All of these are now handled in
+  `engine.py` and pinned by `python/test_data_layer.py`; see `docs/METHODOLOGY.md` for detail.

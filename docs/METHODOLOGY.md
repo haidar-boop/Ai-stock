@@ -134,12 +134,17 @@ historical data was mostly embedded drift, not pattern recognition.**
 Documented because they silently corrupt results:
 
 - **Spurious trailing weekly bar.** Yahoo appends a partial bar duplicating the last daily bar,
-  corrupting weekly RSI/MACD/ATR. Handled in `engine.py`.
+  corrupting weekly RSI/MACD/ATR. Handled in `engine.py` — note the guard must test whether the
+  bar's **final session** has passed, not the inter-bar gap: bars are stamped at period start, so
+  a still-forming weekly bar is a full 7 days after its predecessor and a gap test never sees it.
 - **WTI negative price.** CL=F closed at **−$37.63 on 2020-04-20**. Log returns are undefined;
   this produced a `nan` Hurst exponent and inflated kurtosis to 23.26 (4.69 once corrected).
 - **Splice artifact.** Deleting a date range to exclude that episode creates a spurious jump
-  return. Correct approach: *mask* affected returns, don't delete rows.
+  return. Correct approach: *mask* affected returns, don't delete rows. (`engine.py` originally
+  did the wrong thing here despite this warning; it now retains the row and masks the returns.)
 - **Duplicated volume.** CL=F occasionally repeats the prior bar's volume as a placeholder.
+- **Missing volume.** Null volume bars appear across symbols. A single NaN inside a `cumsum`
+  propagates to every subsequent bar, so OBV must zero-fill rather than inherit NaN.
 
 ## 8. Known biases in all of the above
 

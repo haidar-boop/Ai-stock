@@ -49,9 +49,33 @@ def fetch(symbol: str, rng: str = "10y", interval: str = "1d") -> pd.DataFrame:
     )
     df["dt"] = pd.to_datetime(res["timestamp"], unit="s", utc=True).tz_convert("America/New_York")
     df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
-    df = df[df["close"] > 0].reset_index(drop=True)
-    if interval == "1wk" and len(df) > 2 and (df["dt"].iloc[-1] - df["dt"].iloc[-2]).days < 5:
-        df = df.iloc[:-1].reset_index(drop=True)
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+
+    # Non-positive prices are REAL (WTI closed at -$37.63 on 2020-04-20). Deleting
+    # the row splices two non-adjacent bars together and fabricates a single huge
+    # return -- the exact artifact docs/METHODOLOGY.md warns against. The row is
+    # kept here and the affected RETURNS are masked in compute_features().
+
+    # Trailing partial bar. Yahoo stamps a bar at the START of its period, so the
+    # still-forming bar is a full period after its predecessor and an inter-bar
+    # gap test can never see it. Test whether the period has actually elapsed.
+    # (Yahoo separately appends an off-cycle bar in some ranges; catch that too.)
+    if interval in ("1wk", "1mo") and len(df) > 2:
+        last_start = df["dt"].iloc[-1]
+        now = pd.Timestamp.now(tz=last_start.tz)
+        # A weekly bar is complete once its FINAL SESSION has passed (Friday), not
+        # when the calendar week elapses -- testing the latter discards a finished
+        # week all weekend.
+        if interval == "1wk":
+            final_session = last_start + pd.Timedelta(days=4)
+        else:
+            final_session = last_start + pd.offsets.MonthEnd(1)
+        still_forming = now.normalize() <= final_session.normalize()
+        # Yahoo also appends an off-cycle bar in some ranges (e.g. a Friday-stamped
+        # duplicate of the last daily bar alongside the real Monday-stamped week).
+        off_cycle = (df["dt"].iloc[-1] - df["dt"].iloc[-2]) < pd.Timedelta(days=5)
+        if still_forming or off_cycle:
+            df = df.iloc[:-1].reset_index(drop=True)
     return df
 
 
@@ -64,8 +88,14 @@ def rma(s: pd.Series, n: int) -> pd.Series:
 
 
 def rsi(close: pd.Series, n: int = 14) -> pd.Series:
+    """Wilder RSI. Zero average loss is defined (RSI 100), not NaN — leaving it
+    NaN pushed an undefined value into the confluence score."""
     d = close.diff()
-    return 100 - 100 / (1 + rma(d.clip(lower=0), n) / rma(-d.clip(upper=0), n).replace(0, np.nan))
+    gain = rma(d.clip(lower=0), n)
+    loss = rma(-d.clip(upper=0), n)
+    out = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    # loss == 0: no down moves in the window -> 100, or 50 if price never moved
+    return out.where(loss != 0, np.where(gain > 0, 100.0, 50.0))
 
 
 def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
@@ -104,17 +134,26 @@ def percentrank(s: pd.Series, n: int) -> pd.Series:
 
 
 def obv(df: pd.DataFrame) -> pd.Series:
-    return (np.sign(df["close"].diff()).fillna(0) * df["volume"]).cumsum()
+    """On-balance volume. Missing volume contributes zero rather than NaN: a
+    single NaN inside a cumsum propagates to every subsequent bar."""
+    vol = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+    return (np.sign(df["close"].diff()).fillna(0) * vol).cumsum()
 
 
 def ewma_var(logret: pd.Series, lam: float = 0.94) -> pd.Series:
-    """RiskMetrics EWMA conditional variance — the GARCH proxy used for gating."""
-    r2 = logret.fillna(0.0) ** 2
-    out = np.empty(len(r2))
-    out[0] = r2.iloc[0]
-    vals = r2.to_numpy()
-    for i in range(1, len(r2)):
-        out[i] = lam * out[i - 1] + (1 - lam) * vals[i]
+    """RiskMetrics EWMA conditional variance — the GARCH proxy used for gating.
+
+    An undefined return (NaN) carries the previous variance forward. Treating it
+    as a zero return would inject a fake calm bar and understate volatility,
+    which loosens the noise-floor gate exactly when data is least trustworthy.
+    """
+    vals = logret.to_numpy(dtype=float)
+    out = np.empty(len(vals))
+    prev = 0.0
+    for i, r in enumerate(vals):
+        if np.isfinite(r):
+            prev = r * r if i == 0 else lam * prev + (1 - lam) * r * r
+        out[i] = prev
     return pd.Series(out, index=logret.index)
 
 
@@ -164,6 +203,17 @@ class Config:
 
 
 def _clip(v, lo, hi):
+    """Clip to [lo, hi], propagating NaN.
+
+    Python's min/max silently return a bound for NaN (min(1, nan) -> 1), so the
+    naive form turned any undefined input into the MAXIMUM value — a NaN score
+    became +100, which cleared the long threshold unconditionally.
+    """
+    if v is None:
+        return np.nan
+    v = float(v)
+    if np.isnan(v):
+        return np.nan
     return max(lo, min(hi, v))
 
 
@@ -183,10 +233,15 @@ def compute_features(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = N
     d["z20"] = (c - d["sma20"]) / d["sd20"].replace(0, np.nan)
     d["obv"] = obv(d)
     d["obv_agree"] = np.sign(d["obv"] - d["obv"].shift(20)) == np.sign(c - c.shift(20))
-    d["volavg"] = d["volume"].rolling(cfg.vol_len).mean()
+    # rolling stats tolerate isolated missing volume instead of blanking 20 bars
+    d["volavg"] = d["volume"].rolling(cfg.vol_len, min_periods=max(5, cfg.vol_len // 2)).mean()
     d["relvol"] = d["volume"] / d["volavg"].replace(0, np.nan)
-    d["relvol5"] = d["relvol"].rolling(5).mean()
-    d["logret"] = np.log(c / c.shift())
+    d["relvol5"] = d["relvol"].rolling(5, min_periods=2).mean()
+    # A return spanning a non-positive price is UNDEFINED, not a huge move. Mask
+    # it rather than delete the row (deleting splices two non-adjacent bars and
+    # fabricates one enormous return).
+    prev_c = c.shift()
+    d["logret"] = np.log(c.where(c > 0) / prev_c.where(prev_c > 0))
     d["hv20"] = d["logret"].rolling(20).std(ddof=1) * np.sqrt(252) * 100
     d["hv_pct"] = percentrank(d["hv20"], 252)
     ev = ewma_var(d["logret"], 0.94)
@@ -273,12 +328,12 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         px = row["close"]
 
         # ---- structure ------------------------------------------------------
-        if not np.isnan(row["ph"]):
+        if not np.isnan(row["ph"]) and row["ph"] > 0:
             ph2, ph1 = ph1, row["ph"]
             ph1_bar = i - cfg.piv_len
             ph_arr.append(row["ph"])
             ph_arr[:] = ph_arr[-40:]
-        if not np.isnan(row["pl"]):
+        if not np.isnan(row["pl"]) and row["pl"] > 0:
             pl2, pl1 = pl1, row["pl"]
             pl1_bar = i - cfg.piv_len
             pl_arr.append(row["pl"])
@@ -431,11 +486,15 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         g_setup = setup_retest or setup_range_low or setup_pullback or setup_reclaim
         cool_ok = (i - last_sig) >= cfg.cooldown
 
-        long_raw = all([g_noise, g_rr, g_score, g_vol_regime, g_volume, g_setup, cool_ok])
+        g_price = px > 0 and np.isfinite(px) and not np.isnan(score)
+        long_raw = all([g_price, g_noise, g_rr, g_score, g_vol_regime,
+                        g_volume, g_setup, cool_ok])
 
         # ---- blocking reason -------------------------------------------------
         if long_raw:
             block = "-"
+        elif np.isnan(score) or px <= 0:
+            block = "indicators not ready / price unusable"
         elif not g_vol_regime:
             block = "high volatility"
         elif not g_setup:
