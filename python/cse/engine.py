@@ -319,6 +319,8 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
              ("long_sig", "short_sig", "exit_sig", "db_armed", "struct_up", "struct_dn", "high_vol")}
     regime_out = np.array(["" for _ in range(n)], dtype=object)
     block_out = np.array(["" for _ in range(n)], dtype=object)
+    exit_px_out = np.full(n, np.nan)
+    exit_reason_out = np.array(["" for _ in range(n)], dtype=object)
     pos_out = np.zeros(n, dtype=int)
     stop_out = np.full(n, np.nan)
     tgt_out = np.full(n, np.nan)
@@ -511,18 +513,40 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
             block = "cooldown"
 
         # ---- position management ---------------------------------------------
+        # Barrier tests must be SYMMETRIC. Filling the target on the intrabar high
+        # while only stopping on the close lets a bar trade clean through the stop,
+        # recover, and record no loss — which inflates every backtested return.
+        # Both barriers are therefore tested against intrabar extremes, and the
+        # fill price is the barrier itself (or the open, when the bar gapped past
+        # it) rather than the bar's close.
         long_sig = long_raw and pos <= 0
         exit_sig = False
+        exit_px = np.nan
+        exit_reason = ""
         if pos == 1:
-            hit_stop = px < stop
-            hit_tgt = row["high"] >= tgt
+            lo_j, hi_j, op_j = row["low"], row["high"], row["open"]
+            hit_stop = (not np.isnan(stop)) and lo_j <= stop
+            hit_tgt = (not np.isnan(tgt)) and hi_j >= tgt
             # db_fail may only close a trade that was ENTERED on that pattern —
             # it is persistent global state, not a property of every trade.
             degraded = (not np.isnan(score) and score < 0) or (db_fail and entry_armed)
             extended = (not np.isnan(row["z20"]) and row["z20"] > 2.0
                         and not np.isnan(row["stochk"]) and row["stochk"] > 90
                         and not np.isnan(row["relvol5"]) and row["relvol5"] < 0.8)
-            exit_sig = hit_stop or hit_tgt or degraded or extended
+            if hit_stop:
+                # If both barriers were touched in the same bar, OHLC cannot tell
+                # us which came first, so the adverse one is assumed.
+                exit_px = min(op_j, stop)      # a gap through the stop fills at the open
+                exit_reason = "stop"
+                exit_sig = True
+            elif hit_tgt:
+                exit_px = max(op_j, tgt)       # a gap through the target fills at the open
+                exit_reason = "target"
+                exit_sig = True
+            elif degraded or extended:
+                exit_px = px                   # signal-based exits act on the close
+                exit_reason = "degraded" if degraded else "extended"
+                exit_sig = True
 
         if long_sig:
             pos, entry, stop, tgt = 1, px, l_stop, l_tgt
@@ -543,6 +567,7 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         flags["struct_up"][i], flags["struct_dn"][i] = s_up, s_dn
         flags["high_vol"][i] = high_vol
         regime_out[i], block_out[i] = regime, block
+        exit_px_out[i], exit_reason_out[i] = exit_px, exit_reason
         pos_out[i], stop_out[i], tgt_out[i] = pos, stop, tgt
 
     for k, v in cols.items():
@@ -551,6 +576,8 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         d[k] = v
     d["regime"] = regime_out
     d["blocked_by"] = block_out
+    d["exit_price"] = exit_px_out
+    d["exit_reason"] = exit_reason_out
     d["pos"] = pos_out
     d["stop"] = stop_out
     d["target"] = tgt_out

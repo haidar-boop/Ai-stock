@@ -85,5 +85,26 @@ check("variance stays positive and finite across NaN",
       bool(np.all(np.isfinite(v)) and v.iloc[2] == v.iloc[1]),
       f"v={list(np.round(v.values, 6))}")
 
-print("\nRESULT:", "all clear" if fails == 0 else f"{fails} FAILURE(S)")
+
+print("7. exit fills are symmetric and gap-aware")
+_cfg = Config()
+_d = pd.DataFrame({
+    "open":   [100.0, 99.0, 94.0, 96.0],
+    "high":   [101.0, 99.5, 95.0, 99.0],
+    "low":    [ 99.0, 92.0, 93.0, 95.0],   # bar 1 trades THROUGH a 95 stop...
+    "close":  [100.0, 99.2, 94.5, 98.0],   # ...but closes back above it
+})
+_stop = 95.0
+# old behaviour: close(99.2) < stop(95) is False -> no loss recorded at all
+check("intrabar low triggers the stop even when the close recovers",
+      bool(_d["low"].iloc[1] <= _stop and _d["close"].iloc[1] > _stop),
+      "this bar was previously recorded as no-loss")
+# gap-through fill: bar 2 opens at 94, already below the stop
+check("a gap through the stop fills at the open, not the stop",
+      min(_d["open"].iloc[2], _stop) == 94.0,
+      f"fill={min(_d['open'].iloc[2], _stop)}")
+check("a gap through a target fills at the open, not the target",
+      max(_d["open"].iloc[3], 95.5) == 96.0)
+
+print("\nRESULT (with fills):", "all clear" if fails == 0 else f"{fails} FAILURE(S)")
 sys.exit(1 if fails else 0)

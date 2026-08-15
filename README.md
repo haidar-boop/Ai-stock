@@ -16,8 +16,8 @@ including the one that undercuts the tool:
 
 | Test | Basket | Trades | Edge vs random entry | p-value | Verdict |
 |---|---|---|---|---|---|
-| In-sample | Tech / energy (the design basket) | 134 | **+1.648 pp/trade** (+3.34 sd) | **<0.003** | Entry adds signal |
-| **Out-of-sample** | **14 names never used to design the rules** | **144** | **+0.014 pp/trade** (+0.04 sd) | **0.460** | **No edge whatsoever** |
+| In-sample | Tech / energy (the design basket) | 135 | **+1.738 pp/trade** (+3.65 sd) | **<0.003** | Entry adds signal |
+| **Out-of-sample** | **14 names never used to design the rules** | **146** | **+0.245 pp/trade** (+0.88 sd) | **0.183** | **Not significant** |
 
 > These figures were regenerated after fixing a higher-timeframe **lookahead bug** that
 > contaminated all previously published numbers (see *Corrections* below). The in-sample figure
@@ -40,14 +40,23 @@ One more result worth internalising:
 ```
                  in-sample            out-of-sample
               engine   random       engine   random
-mean/trade   +2.529%  +0.887%      +0.221%  +0.207%   <-- OOS: identical to random
-win rate       49.3%    55.3%        34.7%    48.3%   <-- engine wins LESS often, both times
+mean/trade   +2.616%  +0.878%      +0.472%  +0.228%
+win rate       45.9%    53.6%        32.2%    46.3%   <-- engine wins LESS often, both times
 ```
 
-**The engine wins less often than random entry in both baskets.** In-sample it compensates with
-larger wins. Out-of-sample it does not: the mean matches random almost exactly (+0.221% vs
-+0.207%) while the win rate is 13.6 points *worse*. The median trade is **negative in both
-baskets** — any positive mean is carried by a small minority of large winners.
+**The engine wins less often than random entry in both baskets** — by 7.7 and 14.1 points. It is
+a low-hit-rate, large-win profile, and the trade ledger shows exactly that:
+
+| Exit reason | n | Median | Mean |
+|---|---|---|---|
+| target | 44 | **+10.02%** | +10.53% |
+| stop | 57 | −2.33% | −3.24% |
+| degraded (score collapsed) | 27 | −1.06% | −0.58% |
+| extended (stretched, volume fading) | 7 | +3.53% | +3.63% |
+
+Profit factor 2.31; average win +9.43% against average loss −2.72%. **The median trade is negative
+in both baskets** — 42% of trades stop out and the mean is carried entirely by the 33% that reach
+target. If you cannot sit through that, this tool will feel broken while working as designed.
 
 Reproduce any of this yourself:
 
@@ -198,20 +207,34 @@ EWMA variance also now carries forward across undefined returns instead of injec
 return, which would have understated volatility and *loosened* the noise-floor gate precisely
 where data is least trustworthy.
 
+**2026-08-15 — asymmetric backtest fills (fixed).** Targets filled on the intrabar high while
+stops only triggered on the **close**, so a bar could trade clean through the stop, recover, and
+record no loss. Both barriers are now tested against intrabar extremes; when both are touched in
+one bar the **stop takes precedence** (OHLC cannot resolve the order, so the adverse case is
+assumed); and fills use the barrier price, or the **open** when the bar gapped past it.
+
+Worth recording that this bug ran in **both** directions, and the net was the opposite of what I
+predicted. Stops were too lenient (overstating returns), but targets triggered on the high and
+then settled at the bar's *close*, systematically **understating wins**. Fixing both lowered the
+win rate (49.3% → 45.9% in-sample) and *raised* the mean (+2.529% → +2.616%), because winners are
+now booked at the target instead of wherever the bar happened to close.
+
+Concrete example, AAPL 2026-07-31: the bar opened 304.81, low 300.00, closed 308.91. It gapped
+straight through the stop, but `close < stop` was false, so the old code recorded **no loss at
+all**. It now fills at the open.
+
 **Open issues.** An audit found further defects that are *not yet fixed* and that still affect the
 numbers above. Do not treat the current figures as final:
 
-1. Backtest fills are asymmetric — targets fill on the intrabar high, stops only on the close,
-   which inflates returns.
-2. The retest gate (`low <= neckline * 1.015`) is satisfied ~73% of the time within one bar of the
+1. The retest gate (`low <= neckline * 1.015`) is satisfied ~73% of the time within one bar of the
    breakout, so the engine largely signals on the breakout itself. **The headline design
    principle is not meaningfully implemented.**
-3. An armed double-bottom never expires, so after a rally past a stale target the engine can stop
+2. An armed double-bottom never expires, so after a rally past a stale target the engine can stop
    signalling permanently.
-4. The randomization test gives real and random entries different maximum holding windows, and
+3. The randomization test gives real and random entries different maximum holding windows, and
    random entries can inherit an open position's target — both bias the comparison toward the
    engine.
-5. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
+4. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
    position reversals emit no exit, the double-top detector lacks the double-bottom's pair-wise
    matching and staleness expiry, and the EXIT marker fires one bar late.
 
@@ -220,7 +243,7 @@ numbers above. Do not treat the current figures as final:
 - **No demonstrated out-of-sample entry edge.** See above. Use it as a discipline framework —
   it enforces volatility-aware targets, R:R minimums, structural stops, and regime awareness —
   rather than as a source of alpha.
-- **Small samples.** 134 in-sample and 144 out-of-sample trades. Both are too small for strong
+- **Small samples.** 135 in-sample and 146 out-of-sample trades. Both are too small for strong
   conclusions in either direction.
 - **Backtests exclude commissions, slippage, and spread**, which would reduce every result.
 - **Bull-market window.** The 10-year study period was mostly a bull market; random entries alone

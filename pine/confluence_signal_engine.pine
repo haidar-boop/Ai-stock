@@ -439,8 +439,12 @@ longSig  = longRaw  and posState <= 0
 shortSig = shortRaw and posState >= 0
 
 // exits
-exitLongStop = posState == 1 and not na(stopPx) and close < stopPx
-exitLongTgt  = posState == 1 and not na(tgtPx)  and high >= tgtPx
+// Barrier tests are SYMMETRIC: filling the target on the intrabar high while
+// only stopping on the close lets a bar trade clean through the stop, recover,
+// and record no loss. When BOTH barriers are touched in one bar, OHLC cannot
+// resolve the order, so the stop takes precedence (the adverse assumption).
+exitLongStop = posState == 1 and not na(stopPx) and low <= stopPx
+exitLongTgt  = posState == 1 and not na(tgtPx)  and high >= tgtPx and not exitLongStop
 // dbFail is persistent global state: it may only close a trade that was
 // ENTERED on that pattern, never an unrelated pullback/range trade.
 exitLongDeg  = posState == 1 and (score < 0 or (entryArmed and dbFail))
@@ -448,8 +452,8 @@ exitLongDeg  = posState == 1 and (score < 0 or (entryArmed and dbFail))
 exitLongExt  = posState == 1 and z20 > 2.0 and stochK > 90 and not na(relVol5) and relVol5 < 0.8
 exitLong     = exitLongStop or exitLongTgt or exitLongDeg or exitLongExt
 
-exitShortStop= posState == -1 and not na(stopPx) and close > stopPx
-exitShortTgt = posState == -1 and not na(tgtPx)  and low <= tgtPx
+exitShortStop= posState == -1 and not na(stopPx) and high >= stopPx
+exitShortTgt = posState == -1 and not na(tgtPx)  and low <= tgtPx and not exitShortStop
 exitShortDeg = posState == -1 and (score > 0 or (entryArmed and dtFail))
 exitShort    = exitShortStop or exitShortTgt or exitShortDeg
 

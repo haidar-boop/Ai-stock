@@ -35,12 +35,18 @@ def trades_from(d: pd.DataFrame) -> pd.DataFrame:
         if d["long_sig"].iloc[i]:
             open_i = i
         elif open_i is not None and d["pos"].iloc[i] == 0 and d["pos"].iloc[i - 1] == 1:
-            e, x = d["close"].iloc[open_i], d["close"].iloc[i]
+            e = d["close"].iloc[open_i]
+            # settle at the engine's realistic fill (stop/target price, or the
+            # open when the bar gapped past it) rather than the bar's close
+            x = d["exit_price"].iloc[i]
+            if pd.isna(x):
+                x = d["close"].iloc[i]
             rows.append(dict(
                 entry_i=open_i, exit_i=i, bars=i - open_i,
                 entry=e, exit=x, ret=(x / e - 1) * 100,
                 rr_planned=d["long_rr"].iloc[open_i],
                 regime=d["regime"].iloc[open_i],
+                reason=d["exit_reason"].iloc[i],
                 armed=bool(d["db_armed"].iloc[open_i]),
             ))
             open_i = None
@@ -144,6 +150,9 @@ def main(syms: list[str]) -> None:
                   f"avg win={pos.mean():+.2f}%  avg loss={neg.mean():+.2f}%")
         print("\n  by regime at entry:")
         print(T.groupby("regime")["ret"].agg(["count", "median", "mean"]).to_string(
+            float_format=lambda x: f"{x:.2f}"))
+        print("\n  by exit reason:")
+        print(T.groupby("reason")["ret"].agg(["count", "median", "mean"]).to_string(
             float_format=lambda x: f"{x:.2f}"))
         print("\n  double-bottom retest-held signals vs other setups:")
         print(T.groupby("armed")["ret"].agg(["count", "median", "mean"]).to_string(

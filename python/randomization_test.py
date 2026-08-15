@@ -30,6 +30,8 @@ def simulate(d: pd.DataFrame, entries: list[int], cfg: Config) -> list[float]:
     """Apply the engine's exit rules to an arbitrary set of entry bars."""
     c = d["close"].to_numpy()
     hi = d["high"].to_numpy()
+    lo = d["low"].to_numpy()
+    op = d["open"].to_numpy()
     atrv = d["atr"].to_numpy()
     sup = d["sup"].to_numpy()
     tgt_a = d["target"].to_numpy()
@@ -52,7 +54,15 @@ def simulate(d: pd.DataFrame, entries: list[int], cfg: Config) -> list[float]:
             extended = (not np.isnan(z[j]) and z[j] > 2.0
                         and not np.isnan(sk[j]) and sk[j] > 90
                         and not np.isnan(rv[j]) and rv[j] < 0.8)
-            if c[j] < stop or hi[j] >= tgt or degraded or extended:
+            # symmetric intrabar barriers, adverse-first when both are touched,
+            # gap-aware fills -- must match cse.engine.run() exactly
+            if lo[j] <= stop:
+                exit_px = min(op[j], stop)
+                break
+            if hi[j] >= tgt:
+                exit_px = max(op[j], tgt)
+                break
+            if degraded or extended:
                 exit_px = c[j]
                 break
         out.append((exit_px / px - 1) * 100)
