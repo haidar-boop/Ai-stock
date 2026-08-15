@@ -16,15 +16,15 @@ including the one that undercuts the tool:
 
 | Test | Basket | Trades | Edge vs random entry | p-value | Verdict |
 |---|---|---|---|---|---|
-| In-sample | Tech / energy (the design basket) | 155 | **+1.549 pp/trade** (+2.91 sd) | **<0.003** | Entry adds signal |
-| **Out-of-sample** | **14 names never used to design the rules** | **168** | **−0.057 pp/trade** (−0.18 sd) | **0.573** | **Slightly worse than random** |
+| In-sample | Tech / energy (the design basket) | 173 | **+1.929 pp/trade** (+3.81 sd) | **<0.003** | Entry adds signal |
+| **Out-of-sample** | **14 names never used to design the rules** | **182** | **−0.074 pp/trade** (−0.24 sd) | **0.597** | **Slightly worse than random** |
 
-> Regenerated after five rounds of correctness fixes (see *Corrections*). The out-of-sample figure
-> after each round: **+0.206 → +0.014 → +0.245 → +0.069 → −0.057 pp/trade**. It has now crossed
-> zero and sits **slightly below random entry**. Every reading is inside noise and the swing
-> between them exceeds the quantity being measured, so the defensible summary is simply: **on
-> symbols the rules were not built on, this engine's entry timing is worth nothing.** Five rounds
-> of bug fixing did not change that, and the current best estimate is marginally negative.
+> Regenerated after six rounds of correctness fixes (see *Corrections*). The out-of-sample figure
+> after each round: **+0.206 → +0.014 → +0.245 → +0.069 → −0.057 → −0.074 pp/trade**. It has
+> crossed zero and sits **slightly below random entry**. Every reading is inside noise and the
+> swing between them exceeds the quantity being measured, so the defensible summary is simply:
+> **on symbols the rules were not built on, this engine's entry timing is worth nothing.** Six
+> rounds of fixing — including deleting the design's own headline principle — did not change it.
 
 **The in-sample edge did not survive out-of-sample.** The rules were tuned on the design basket,
 so the in-sample p-value is optimistically biased. Out-of-sample the engine now returns **less
@@ -93,17 +93,28 @@ returns within ±2 points of their own unconditional baseline. A five-factor reg
 **~3% of forward variance**, with 90% prediction intervals 12–35× wider than the point forecast.
 → *No single indicator can trigger a signal. Confluence across ten weighted factors is required.*
 
-**3. The retest is where the information is.** After a breakout, whether the retest held was by
-far the strongest conditioning event measured (n = 1,150 patterns):
+**3. The retest finding did not survive scrutiny — and the gate built on it was removed.**
+Earlier versions withheld breakout signals until "the retest held", citing 61.7% vs 12.2%
+target-reach rates. Decomposing that statistic (n = 1,150, reproduce with
+`python/research_retest_decomposition.py`) showed it does not mean what it appeared to:
 
-| Condition | Target reached |
-|---|---|
-| Retest **held** | **61.7%** |
-| Retest failed | 12.2% |
-| No false breakout | 69.2% |
-| False breakout occurred | 18.3% |
+| Clause | Fires | P(target) when true | when false | Spread |
+|---|---|---|---|---|
+| retest clause alone | **94.1%** of patterns | 0.336 | 0.897 | **−0.561** |
+| "never closed 2% below neckline in 15 bars" | 55.9% | 0.647 | 0.018 | **+0.629** |
+| published combination | 50.0% | 0.617 | 0.122 | +0.496 |
+| a *stricter*, genuine retest | 51.6% | 0.304 | 0.440 | **−0.136** |
 
-→ *Breakout signals are withheld until the retest resolves.*
+Three problems. The retest clause **fires on 94% of patterns with a median lag of one bar** — a
+breakout closes just above the neckline, so the next bar's low is almost always within 1.5% of it.
+On its own it is **negatively** associated with success. And the entire discrimination came from
+the no-fail clause, which is close to a **restatement of the outcome being predicted**: "target
+first" is *defined* as reaching target before a 2% neckline break, so conditioning on "no 2% break
+in 15 bars" is largely circular. A stricter, genuine retest (move away, return, re-close above)
+tested *worse* than no filter at all.
+
+→ *The retest gate was removed.* Pattern state is still displayed, but not traded on. What
+remains is the causal validity condition: the breakout has not broken down as of this bar.
 
 ## Signal frequency
 
@@ -144,7 +155,7 @@ A signal requires **all** of these:
    range breaks failed 61.8% of the time in testing)
 4. **Volatility regime** — suppressed above the 90th HV percentile
 5. **Volume confirmation** — relative volume ≥ 1.0 or OBV agreeing
-6. **A qualifying setup** — breakout-with-held-retest, range low, uptrend pullback, or mean reclaim
+6. **A qualifying setup** — un-failed breakout, range low, uptrend pullback, or mean reclaim
 7. **Cooldown** since the last signal
 
 ## Tuning
@@ -163,6 +174,7 @@ pine/confluence_signal_engine.pine   the TradingView indicator (the deliverable)
 python/cse/engine.py                 bar-for-bar Python mirror of the Pine logic
 python/test_no_lookahead.py          regression guard: no HTF future data
 python/test_data_layer.py            regression guard: data-handling correctness
+python/research_retest_decomposition.py  evidence that retracted the retest gate
 python/validate.py                   signal stats vs per-symbol baselines
 python/randomization_test.py         engine entries vs random entries
 python/holdout_test.py               out-of-sample check on unseen symbols
@@ -254,13 +266,21 @@ and an armed pattern may only supply the target while that target is still *ahea
 Degenerate targets went from **10.5% to 0.00%** across 7,542 bars, and signal counts rose (155
 in-sample, 168 out-of-sample) because the engine is no longer locking itself out.
 
+**2026-08-15 — the retest gate was removed (design principle retracted).** The gate was not just
+badly implemented, the finding behind it did not hold. See *What it does → 3* above for the
+decomposition: the retest clause fires on 94.1% of patterns at a median lag of one bar, is
+negatively associated with success on its own (0.336 vs 0.897), and the published 61.7%/12.2%
+split came entirely from a clause that restates the outcome being predicted. A stricter, genuine
+retest tested worse still. The gate is gone; pattern state is displayed, not traded on.
+
+I did **not** replace it with a new rule mined from the same data — that is how the original
+overfitting happened. Removing it raised the in-sample edge to +1.929 pp/trade and left the
+out-of-sample figure unchanged at ≈ zero.
+
 **Open issues.** An audit found further defects that are *not yet fixed* and that still affect the
 numbers above. Do not treat the current figures as final:
 
-1. The retest gate (`low <= neckline * 1.015`) is satisfied ~73% of the time within one bar of the
-   breakout, so the engine largely signals on the breakout itself. **The headline design
-   principle is not meaningfully implemented.**
-2. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
+1. Pine only: the short path's target/stop lack the long side's noise-clearing and 1-ATR fixes,
    position reversals emit no exit, the double-top detector lacks the double-bottom's pair-wise
    matching and staleness expiry, and the EXIT marker fires one bar late.
 
@@ -269,7 +289,7 @@ numbers above. Do not treat the current figures as final:
 - **No out-of-sample entry edge — the current estimate is slightly negative.** See above. Use it
   as a discipline framework (it enforces volatility-aware targets, R:R minimums, structural stops
   and regime awareness), not as a source of alpha.
-- **Small samples.** 155 in-sample and 168 out-of-sample trades. Both are too small for strong
+- **Small samples.** 173 in-sample and 182 out-of-sample trades. Both are too small for strong
   conclusions in either direction.
 - **Backtests exclude commissions, slippage, and spread**, which would reduce every result.
 - **Bull-market window.** The 10-year study period was mostly a bull market; random entries alone

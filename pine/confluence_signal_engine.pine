@@ -19,12 +19,15 @@
 //      regression explained only ~3% of forward variance. => No single indicator
 //      may trigger a signal. Confluence is mandatory.
 //
-//   3. THE RETEST IS THE INFORMATION. After a level breakout, whether the retest
-//      HELD was by far the strongest conditioning event measured:
-//         retest held   -> target reached 61.7% of the time
-//         retest failed -> target reached 12.2% of the time
-//         no false-breakout -> 69.2%   |   false breakout -> 18.3%
-//      => Breakout signals are withheld until the retest resolves.
+//   3. THE RETEST FINDING DID NOT HOLD UP. Earlier versions gated breakout
+//      signals on "the retest held", citing 61.7% vs 12.2% target-reach rates.
+//      Decomposing that statistic (n=1150) showed the retest clause fires on
+//      94.1% of patterns with a median lag of ONE bar, and on its own is
+//      NEGATIVELY associated with success (0.336 vs 0.897). The whole split came
+//      from "never closed 2% below the neckline within 15 bars" -- which is close
+//      to a restatement of the outcome being predicted. A stricter, genuine
+//      retest tested worse too (0.304 vs 0.440).
+//      => The retest gate was REMOVED. Pattern state is shown, not traded on.
 //
 //  Expect "NO SIGNAL" most of the time. That is the intended behaviour, not a
 //  malfunction. The dashboard always tells you which gate is blocking.
@@ -306,8 +309,15 @@ if not na(dtBreak)
     if close > dtNeck * 1.02
         dtFail := true
 
-dbArmed = not na(dbBreak) and dbRetest and not dbFail and close > dbNeck
-dtArmed = not na(dtBreak) and dtRetest and not dtFail and close < dtNeck
+// dbRetest is tracked for the dashboard but deliberately NOT gated on. See the
+// header note and python/research_retest_decomposition.py: the retest clause
+// fires on 94.1% of patterns (median lag 1 bar) and is NEGATIVELY associated
+// with reaching target on its own (0.336 vs 0.897). The published 61.7%/12.2%
+// split came entirely from "never closed 2% below the neckline", which restates
+// the outcome being predicted. What remains is the causal validity condition:
+// the breakout has not broken down as of this bar.
+dbArmed = not na(dbBreak) and not dbFail and close > dbNeck
+dtArmed = not na(dtBreak) and not dtFail and close < dtNeck
 dbTarget = not na(dbNeck) and not na(dbBase) ? dbNeck + (dbNeck - dbBase) : na
 
 // ============================================================================

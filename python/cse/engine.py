@@ -385,7 +385,22 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
                     db_fail = True
                 if px < db_neck * 0.98:
                     db_fail = True
-        db_armed = db_break is not None and db_retest and not db_fail and px > db_neck
+        # NOTE: `db_retest` is tracked for display but deliberately NOT gated on.
+        # Decomposing the "retest held -> 61.7% vs 12.2%" statistic that originally
+        # justified it (python/research_retest_decomposition.py, n=1150) showed:
+        #   * the retest clause fires on 94.1% of patterns, median lag 1 bar;
+        #   * on its own it is NEGATIVELY associated with reaching target
+        #     (0.336 when it fires vs 0.897 when it never does);
+        #   * the entire split came from the second clause, "never closed 2% below
+        #     the neckline within 15 bars" — which is close to a restatement of the
+        #     outcome being predicted, since P(target first) is itself defined as
+        #     reaching target BEFORE a 2% neckline break. The finding was largely
+        #     tautological.
+        # A stricter, genuine retest (move away, return, re-close above) was also
+        # tested and is negatively associated too (0.304 vs 0.440).
+        # What remains is the causal validity condition: the breakout has not
+        # broken down as of this bar.
+        db_armed = db_break is not None and not db_fail and px > db_neck
         db_target = db_neck + (db_neck - db_base) if not np.isnan(db_neck) else np.nan
 
         # ---- adaptive levels -------------------------------------------------

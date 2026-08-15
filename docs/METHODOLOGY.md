@@ -72,7 +72,7 @@ GATE 1: the target must clear `noiseMult` × 21-bar σ, or no signal is issued.
 The engine uses **RiskMetrics EWMA (λ = 0.94)** as the live proxy for this, since Pine cannot fit
 GARCH per bar. It tracks the same conditional-variance dynamic closely enough for gating.
 
-## 4. Why the retest decides everything
+## 4. The retest finding — RETRACTED
 
 A pattern detector was run over 15 years × 22 symbols, yielding **1,150 double bottoms**:
 
@@ -91,9 +91,28 @@ Conditioning changes the picture completely:
 | No false breakout | 422 | **0.692** | **+3.87%** |
 | False breakout | 728 | 0.183 | −1.02% |
 
-This is the single strongest conditioning event found anywhere in the study, and it is why the
-engine tracks breakout → retest → hold/fail as an explicit state machine rather than signalling
-on the breakout bar.
+**This conclusion was wrong, and the gate built on it has been removed.** Decomposing the
+statistic (`python/research_retest_decomposition.py`, same n = 1,150) shows:
+
+| Clause | Fires | P(target) true | false | Spread |
+|---|---|---|---|---|
+| retest clause alone | **94.1%** | 0.336 | 0.897 | **−0.561** |
+| no-fail clause alone | 55.9% | 0.647 | 0.018 | **+0.629** |
+| published combination | 50.0% | 0.617 | 0.122 | +0.496 |
+| stricter genuine retest | 51.6% | 0.304 | 0.440 | **−0.136** |
+
+The retest clause fires on 94% of patterns at a median lag of **one bar** — a breakout bar closes
+just above the neckline, so the next bar's low is nearly always within 1.5% of it. Alone it is
+*negatively* associated with reaching target. All of the discrimination came from "never closed 2%
+below the neckline within 15 bars", which is close to circular: P(target first) is *defined* as
+reaching target before a 2% neckline break, so the condition partly restates the outcome.
+
+A stricter retest (price moves ≥1.5% away, returns to touch the level, re-closes above) occurs on
+51.6% of patterns and is also negatively associated (0.304 vs 0.440) — strong breakouts tend not
+to come back.
+
+The engine now tracks breakout → fail as a causal validity condition only. Pattern state is
+displayed, not gated on. No replacement rule was mined from this data.
 
 **Symbol-specific caution:** NVDA's own double-bottom history is the worst in the basket
 (P(target) = 0.200; 0.300 with a volatility-scaled failure buffer; median 21d **−1.35%**, the only
