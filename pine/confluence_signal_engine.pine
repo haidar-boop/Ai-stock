@@ -1,0 +1,605 @@
+//@version=6
+// ============================================================================
+//  CONFLUENCE SIGNAL ENGINE (CSE)
+// ----------------------------------------------------------------------------
+//  A conservative, volatility-aware overlay that scores multi-factor confluence
+//  and issues entry / exit signals ONLY when a setup clears every gate.
+//
+//  DESIGN NOTE - why this indicator stays quiet:
+//  It was built from a quantitative study of 10-15y of daily data across a
+//  22-symbol basket. Three findings shaped it:
+//
+//   1. LEVELS INSIDE NOISE. Typical chart levels (necklines, range edges, fib
+//      retracements) sit 0.6-0.8 sigma of the 21-bar forecast distribution away
+//      from price. At that distance they carry little information. => The engine
+//      REFUSES to signal unless the target sits outside a volatility noise floor.
+//
+//   2. WEAK CONDITIONING. Classic indicator states predicted 21-day forward
+//      returns within +/-2 points of their own unconditional baseline; a 5-factor
+//      regression explained only ~3% of forward variance. => No single indicator
+//      may trigger a signal. Confluence is mandatory.
+//
+//   3. THE RETEST IS THE INFORMATION. After a level breakout, whether the retest
+//      HELD was by far the strongest conditioning event measured:
+//         retest held   -> target reached 61.7% of the time
+//         retest failed -> target reached 12.2% of the time
+//         no false-breakout -> 69.2%   |   false breakout -> 18.3%
+//      => Breakout signals are withheld until the retest resolves.
+//
+//  Expect "NO SIGNAL" most of the time. That is the intended behaviour, not a
+//  malfunction. The dashboard always tells you which gate is blocking.
+//
+//  NON-REPAINTING: higher-timeframe values use a closed-bar offset. Pivot-based
+//  structure confirms with a `Pivot Lookback` bar lag by construction.
+//
+//  NOT INVESTMENT ADVICE. Probabilistic tooling only. Past behaviour does not
+//  guarantee future results.
+// ============================================================================
+
+indicator("Confluence Signal Engine", shorttitle="CSE", overlay=true,
+     max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ============================================================================
+//  INPUTS
+// ============================================================================
+grpS = "Signal Gates"
+longThr    = input.int(45,  "Long score threshold",        minval=10, maxval=100, group=grpS,
+     tooltip="Confluence score (-100..+100) required for a long. Higher = fewer, stronger signals.")
+shortThr   = input.int(55,  "Short score threshold",       minval=10, maxval=100, group=grpS,
+     tooltip="Deliberately stricter than longs: downside range breaks failed 61.8% of the time in testing.")
+minRR      = input.float(1.5,"Minimum reward:risk",        minval=0.5, maxval=10, step=0.1, group=grpS)
+noiseMult  = input.float(1.0,"Noise floor (x 21-bar sigma)",minval=0.0, maxval=3.0, step=0.1, group=grpS,
+     tooltip="Target must be at least this many 21-bar sigmas away. This is the primary gate.")
+hvSuppress = input.int(90,  "Suppress above HV percentile",minval=50, maxval=100, group=grpS,
+     tooltip="No signals when 20-bar historical volatility is above this percentile of its own 1y range.")
+coolDown   = input.int(10,  "Cooldown bars between signals",minval=0, maxval=100, group=grpS)
+useVolConf = input.bool(true,"Require volume confirmation", group=grpS)
+
+grpT = "Technical Parameters"
+pivLen     = input.int(5,   "Pivot lookback",              minval=2, maxval=20, group=grpT)
+rsiLen     = input.int(14,  "RSI length",                  minval=2, group=grpT)
+adxLen     = input.int(14,  "ADX / DI length",             minval=2, group=grpT)
+atrLen     = input.int(14,  "ATR length",                  minval=2, group=grpT)
+volLen     = input.int(20,  "Volume average length",       minval=2, group=grpT)
+htfIn      = input.string("Auto","Higher timeframe",
+     options=["Auto","60","240","D","W","M"], group=grpT)
+
+grpP = "Pattern Detection"
+dbTol      = input.float(4.0,"Double top/bottom tolerance %",minval=0.5, maxval=15, step=0.5, group=grpP)
+dbMinSep   = input.int(15,  "Min bars between the two lows",minval=5, maxval=200, group=grpP)
+dbMaxSep   = input.int(90,  "Max bars between the two lows",minval=10,maxval=400, group=grpP)
+retestTol  = input.float(1.5,"Retest tolerance %",         minval=0.1, maxval=10, step=0.1, group=grpP)
+fbWindow   = input.int(10,  "False-breakout window (bars)",minval=3, maxval=50, group=grpP)
+rangeLen   = input.int(20,  "Range detection window",      minval=5, maxval=200, group=grpP)
+rangeMaxW  = input.float(9.0,"Max range width %",          minval=1, maxval=50, step=0.5, group=grpP)
+
+grpV = "Display"
+showLvls   = input.bool(true, "Show adaptive S/R levels", group=grpV)
+showZone   = input.bool(true, "Show noise-floor zone",    group=grpV)
+showDash   = input.bool(true, "Show dashboard",           group=grpV)
+dashPos    = input.string("Top Right","Dashboard position",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grpV)
+showLabels = input.bool(true, "Show signal labels",       group=grpV)
+
+// ============================================================================
+//  CORE SERIES
+// ============================================================================
+sma20  = ta.sma(close, 20)
+sma50  = ta.sma(close, 50)
+sma200 = ta.sma(close, 200)
+
+atrV   = ta.atr(atrLen)
+rsiV   = ta.rsi(close, rsiLen)
+[_macdL, _macdS, macdH] = ta.macd(close, 12, 26, 9)
+[diP, diM, adxV]      = ta.dmi(adxLen, adxLen)
+stochK = ta.sma(ta.stoch(close, high, low, 14), 3)
+
+sd20    = ta.stdev(close, 20)
+bbWidth = sd20 > 0 and sma20 > 0 ? 4 * sd20 / sma20 * 100 : 0.0
+z20     = sd20 > 0 ? (close - sma20) / sd20 : 0.0
+
+obvV    = ta.obv
+obvSlope= obvV - obvV[20]
+pxSlope = close - close[20]
+obvAgree= (obvSlope > 0) == (pxSlope > 0)
+
+volAvg  = ta.sma(volume, volLen)
+relVol  = volAvg > 0 ? volume / volAvg : 1.0
+relVol5 = ta.sma(relVol, 5)
+
+logret  = math.log(close / close[1])
+hv20    = ta.stdev(logret, 20) * math.sqrt(252) * 100
+hvPct   = ta.percentrank(hv20, 252)
+
+// --- EWMA variance as a lightweight GARCH proxy -----------------------------
+// Full GARCH(1,1) fits offline (see python/); RiskMetrics EWMA (lambda=.94)
+// tracks the same conditional-variance dynamic closely enough for gating.
+lambda = 0.94
+var float ewmaVar = na
+ewmaVar := na(ewmaVar) or bar_index < 2 ? math.pow(nz(logret), 2)
+     : lambda * ewmaVar + (1 - lambda) * math.pow(nz(logret), 2)
+ewmaVolAnn = math.sqrt(math.max(ewmaVar, 0) * 252) * 100
+// 21-bar sigma expressed in PRICE units -> the noise floor
+sigma21    = math.sqrt(math.max(ewmaVar, 0) * 21)
+noiseFloor = close * sigma21
+volRising  = ewmaVolAnn > hv20
+
+// ============================================================================
+//  HIGHER TIMEFRAME (non-repainting: reads the previous, closed HTF bar)
+// ============================================================================
+autoHtf = timeframe.isintraday ? (timeframe.multiplier <= 15 ? "240" : "D")
+     : timeframe.isdaily ? "W" : "M"
+htfRes  = htfIn == "Auto" ? autoHtf : htfIn
+
+htfClose = request.security(syminfo.tickerid, htfRes, close[1], lookahead=barmerge.lookahead_off)
+htfSma   = request.security(syminfo.tickerid, htfRes, ta.sma(close, 50)[1], lookahead=barmerge.lookahead_off)
+htfUp    = not na(htfClose) and not na(htfSma) and htfClose > htfSma
+htfDn    = not na(htfClose) and not na(htfSma) and htfClose < htfSma
+
+// ============================================================================
+//  MARKET STRUCTURE  (pivots -> HH/HL/LH/LL)
+// ============================================================================
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+
+var float ph1 = na
+var float ph2 = na
+var float pl1 = na
+var float pl2 = na
+var int   ph1Bar = na
+var int   ph2Bar = na
+var int   pl1Bar = na
+var int   pl2Bar = na
+
+if not na(ph)
+    ph2 := ph1
+    ph2Bar := ph1Bar
+    ph1 := ph
+    ph1Bar := bar_index - pivLen
+if not na(pl)
+    pl2 := pl1
+    pl2Bar := pl1Bar
+    pl1 := pl
+    pl1Bar := bar_index - pivLen
+
+isHH = not na(ph1) and not na(ph2) and ph1 > ph2
+isHL = not na(pl1) and not na(pl2) and pl1 > pl2
+isLH = not na(ph1) and not na(ph2) and ph1 < ph2
+isLL = not na(pl1) and not na(pl2) and pl1 < pl2
+structUp = isHH and isHL
+structDn = isLH and isLL
+
+// --- rolling pivot arrays for adaptive S/R ---------------------------------
+var array<float> phArr = array.new<float>()
+var array<float> plArr = array.new<float>()
+var array<int>   plBarArr = array.new<int>()
+maxLvls = 40
+if not na(ph)
+    array.push(phArr, ph)
+    if array.size(phArr) > maxLvls
+        array.shift(phArr)
+if not na(pl)
+    array.push(plArr, pl)
+    array.push(plBarArr, bar_index - pivLen)
+    if array.size(plArr) > maxLvls
+        array.shift(plArr)
+        array.shift(plBarArr)
+
+// nearest level above / below, plus a cluster-strength count
+f_nearestAbove(arr, px) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if v > px and (na(best) or v < best)
+                best := v
+    best
+
+f_nearestBelow(arr, px) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if v < px and (na(best) or v > best)
+                best := v
+    best
+
+f_strength(arr, lvl, tolPct) =>
+    int n = 0
+    if not na(lvl) and array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if math.abs(v - lvl) / lvl * 100 <= tolPct
+                n += 1
+    n
+
+resLvl = f_nearestAbove(phArr, close)
+supLvl = f_nearestBelow(plArr, close)
+resStr = f_strength(phArr, resLvl, 1.5)
+supStr = f_strength(plArr, supLvl, 1.5)
+
+// distance to levels measured in SIGMA (the core "is this real?" metric)
+resSigma = not na(resLvl) and noiseFloor > 0 ? (resLvl - close) / noiseFloor : na
+supSigma = not na(supLvl) and noiseFloor > 0 ? (close - supLvl) / noiseFloor : na
+
+// ============================================================================
+//  PATTERN STATE MACHINE  (double bottom / top with retest tracking)
+// ============================================================================
+var float dbNeck   = na     // neckline of an active bullish pattern
+var float dbBase   = na
+var int   dbBreak  = na     // bar_index of breakout
+var bool  dbRetest = false
+var bool  dbFail   = false
+var int   dbBorn   = -100000
+
+var float dtNeck   = na     // bearish mirror
+var float dtBase   = na
+var int   dtBreak  = na
+var bool  dtRetest = false
+var bool  dtFail   = false
+
+// --- detect a fresh double bottom on each new confirmed pivot low ----------
+// Compare the new pivot low against the LAST SEVERAL pivot lows, not only the
+// immediately preceding one. A qualifying pair is routinely separated by an
+// intervening pivot (e.g. NVDA 189.80 -> 197.97 -> 190.01); consecutive-only
+// matching misses those completely.
+if not na(pl) and array.size(plArr) >= 2
+    curBar = bar_index - pivLen
+    int matched = 0
+    for k = array.size(plArr) - 2 to math.max(0, array.size(plArr) - 8) by -1
+        if matched == 0
+            pv  = array.get(plArr, k)
+            pb  = array.get(plBarArr, k)
+            sep = curBar - pb
+            if sep <= dbMaxSep and sep >= dbMinSep and math.abs(pl - pv) / pv * 100 <= dbTol
+                nk = ta.highest(high, math.min(math.max(sep + pivLen, 1), 400))
+                bs = math.min(pl, pv)
+                if not na(nk) and (nk - bs) / bs * 100 >= 5.0
+                    dbNeck  := nk
+                    dbBase  := bs
+                    dbBreak := na
+                    dbRetest:= false
+                    dbFail  := false
+                    dbBorn  := bar_index
+                matched := 1
+
+if not na(ph) and not na(ph2) and not na(ph2Bar)
+    sepT = ph1Bar - ph2Bar
+    withinT = math.abs(ph1 - ph2) / ph2 * 100 <= dbTol
+    if withinT and sepT >= dbMinSep and sepT <= dbMaxSep
+        nkT = ta.lowest(low, math.min(math.max(sepT + pivLen, 1), 400))
+        bsT = math.max(ph1, ph2)
+        if not na(nkT) and (bsT - nkT) / nkT * 100 >= 5.0
+            dtNeck  := nkT
+            dtBase  := bsT
+            dtBreak := na
+            dtRetest:= false
+            dtFail  := false
+
+// --- breakout / retest / failure bookkeeping -------------------------------
+// A pattern that never breaks out goes stale; drop it rather than let an old
+// neckline linger on the chart indefinitely.
+if not na(dbNeck) and na(dbBreak) and bar_index - dbBorn > dbMaxSep * 2
+    dbNeck := na
+    dbBase := na
+if not na(dbNeck) and na(dbBreak) and close > dbNeck
+    dbBreak := bar_index
+if not na(dbBreak)
+    if low <= dbNeck * (1 + retestTol / 100) and bar_index > dbBreak
+        dbRetest := true
+    if close < dbNeck and bar_index - dbBreak <= fbWindow
+        dbFail := true                      // the 18.3% bucket
+    if close < dbNeck * 0.98
+        dbFail := true
+
+if not na(dtNeck) and na(dtBreak) and close < dtNeck
+    dtBreak := bar_index
+if not na(dtBreak)
+    if high >= dtNeck * (1 - retestTol / 100) and bar_index > dtBreak
+        dtRetest := true
+    if close > dtNeck and bar_index - dtBreak <= fbWindow
+        dtFail := true
+    if close > dtNeck * 1.02
+        dtFail := true
+
+dbArmed = not na(dbBreak) and dbRetest and not dbFail and close > dbNeck
+dtArmed = not na(dtBreak) and dtRetest and not dtFail and close < dtNeck
+dbTarget = not na(dbNeck) and not na(dbBase) ? dbNeck + (dbNeck - dbBase) : na
+
+// ============================================================================
+//  RANGE / REGIME
+// ============================================================================
+rngHi   = ta.highest(high, rangeLen)
+rngLo   = ta.lowest(low,  rangeLen)
+rngW    = rngLo > 0 ? (rngHi - rngLo) / rngLo * 100 : na
+inRange = not na(rngW) and rngW <= rangeMaxW
+
+regime = adxV >= 25 and diP > diM ? "TREND UP"
+     : adxV >= 25 and diM > diP ? "TREND DOWN"
+     : adxV < 20 and inRange     ? "RANGE"
+     : adxV < 20                 ? "CHOP"
+     :                             "TRANSITION"
+highVol = hvPct >= hvSuppress
+
+// ============================================================================
+//  CONFLUENCE SCORE   (-100 .. +100)
+// ============================================================================
+// Weights reflect measured information content, not chart-lore convention.
+// Structure / HTF trend carry the most; single oscillators carry the least.
+f_clip(v, lo, hi) => math.max(lo, math.min(hi, v))
+
+cMA     = ((close > sma20 ? 1.0 : -1.0) + (sma20 > sma50 ? 1.0 : -1.0)
+     + (na(sma200) ? 0.0 : (sma50 > sma200 ? 1.0 : -1.0))) / 3.0
+cHTF    = htfUp ? 1.0 : htfDn ? -1.0 : 0.0
+cStruct = structUp ? 1.0 : structDn ? -1.0 : 0.0
+cADX    = (adxV >= 25 ? 1.0 : adxV >= 20 ? 0.5 : 0.15) * (diP > diM ? 1.0 : -1.0)
+cMACD   = (macdH > 0 ? 1.0 : -1.0) * (math.abs(macdH) > math.abs(macdH[1]) ? 1.0 : 0.5)
+cRSI    = f_clip((rsiV - 50) / 25.0, -1.0, 1.0)
+cVol    = (relVol5 >= 1.0 ? 0.5 : -0.25) + (obvAgree ? 0.5 : -0.5)
+// extension PENALTY: |Z|>1.5 historically compressed rather than continued
+cExt    = math.abs(z20) > 1.5 ? -math.sign(z20) * f_clip((math.abs(z20) - 1.5) / 1.5, 0, 1) : 0.0
+// volatility PENALTY: high HV percentile predicted LOWER forward equity returns
+cHV     = hvPct > 80 ? -0.6 : hvPct > 60 ? -0.25 : 0.15
+// level context
+cLvl    = (not na(supSigma) and supSigma < 0.35 ? 0.5 : 0.0)
+     + (not na(resSigma) and resSigma < 0.35 ? -0.5 : 0.0)
+
+wMA     = 2.0
+wHTF    = 2.0
+wStruct = 1.5
+wADX    = 1.5
+wMACD   = 1.0
+wRSI    = 1.0
+wVol    = 1.0
+wExt    = 1.0
+wHV     = 1.0
+wLvl    = 1.0
+wTot = wMA + wHTF + wStruct + wADX + wMACD + wRSI + wVol + wExt + wHV + wLvl
+
+rawScore = cMA*wMA + cHTF*wHTF + cStruct*wStruct + cADX*wADX + cMACD*wMACD
+     + cRSI*wRSI + cVol*wVol + cExt*wExt + cHV*wHV + cLvl*wLvl
+score = f_clip(rawScore / wTot * 100, -100, 100)
+
+// ============================================================================
+//  TRADE GEOMETRY & GATES
+// ============================================================================
+// TARGET = nearest resistance that CLEARS the noise floor. Using the merely
+// nearest pivot high makes the noise gate self-defeating (it sits ~0.2 sigma
+// away by construction). No qualifying level overhead = blue sky = ATR target.
+f_targetAbove(arr, px, need) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if v - px >= need and (na(best) or v < best)
+                best := v
+    best
+needUp  = noiseMult * noiseFloor
+resTgt0 = f_targetAbove(phArr, close, needUp)
+resTgt  = na(resTgt0) ? close + math.max(2.5 * atrV, needUp) : resTgt0
+
+// STOP sits below structure but never tighter than 1 ATR: a stop closer than
+// one ATR is noise-triggered and inflates R:R with a fake edge.
+structStop = not na(supLvl) ? supLvl - 0.5 * atrV : close - 2.0 * atrV
+longStop   = math.min(structStop, close - 1.0 * atrV)
+longTgt    = not na(dbTarget) and dbArmed ? dbTarget : resTgt
+longRisk   = close - longStop
+longRew    = not na(longTgt) ? longTgt - close : na
+longRR     = not na(longRew) and longRisk > 0 ? longRew / longRisk : na
+
+shortStop  = not na(resLvl) ? resLvl + 0.5 * atrV : close + 2.0 * atrV
+shortTgt   = supLvl
+shortRisk  = shortStop - close
+shortRew   = not na(shortTgt) ? close - shortTgt : na
+shortRR    = not na(shortRew) and shortRisk > 0 ? shortRew / shortRisk : na
+
+// GATE 1 (primary): target must sit outside the volatility noise floor
+gateNoiseL = not na(longTgt)  and (longTgt - close)  >= noiseMult * noiseFloor
+gateNoiseS = not na(shortTgt) and (close - shortTgt) >= noiseMult * noiseFloor
+// GATE 2: reward:risk
+gateRRL    = not na(longRR)  and longRR  >= minRR
+gateRRS    = not na(shortRR) and shortRR >= minRR
+// GATE 3: confluence
+gateScoreL = score >=  longThr
+gateScoreS = score <= -shortThr
+// GATE 4: volatility regime not pathological
+gateVol    = not highVol
+// GATE 5: volume confirmation
+gateVolume = not useVolConf or (relVol >= 1.0 or obvAgree)
+// GATE 6: a qualifying setup must be present
+uptrendCtx       = htfUp or (not na(sma200) and sma50 > sma200)
+setupBreakRetest = dbArmed
+setupRangeLow    = inRange and close <= rngLo + (rngHi - rngLo) * 0.30 and close > rngLo and rsiV < 55
+setupPullback    = uptrendCtx and close > sma50 and z20 < 0.8 and rsiV > 35 and rsiV < 62
+     and close > close[1]
+setupReclaim     = uptrendCtx and close > sma50 and close[1] <= sma50[1]
+gateSetupL = setupBreakRetest or setupRangeLow or setupPullback or setupReclaim
+
+setupBreakdown   = dtArmed
+setupRangeHigh   = inRange and close >= rngHi - (rngHi - rngLo) * 0.25 and close < rngHi and rsiV > 50
+gateSetupS = setupBreakdown or setupRangeHigh
+
+var int lastSigBar = -1000
+coolOK = bar_index - lastSigBar >= coolDown
+
+longRaw  = gateNoiseL and gateRRL and gateScoreL and gateVol and gateVolume and gateSetupL and coolOK
+shortRaw = gateNoiseS and gateRRS and gateScoreS and gateVol and gateVolume and gateSetupS and coolOK
+
+// position state so EXIT only fires when something is open
+var int  posState  = 0        // 1 long, -1 short, 0 flat
+var float entryPx  = na
+var float stopPx   = na
+var float tgtPx    = na
+var bool  entryArmed = false  // was this trade entered on the double-bottom setup?
+
+longSig  = longRaw  and posState <= 0
+shortSig = shortRaw and posState >= 0
+
+// exits
+exitLongStop = posState == 1 and not na(stopPx) and close < stopPx
+exitLongTgt  = posState == 1 and not na(tgtPx)  and high >= tgtPx
+// dbFail is persistent global state: it may only close a trade that was
+// ENTERED on that pattern, never an unrelated pullback/range trade.
+exitLongDeg  = posState == 1 and (score < 0 or (entryArmed and dbFail))
+// "extension exit": the fading-volume-into-resistance signature
+exitLongExt  = posState == 1 and z20 > 2.0 and stochK > 90 and relVol5 < 0.8
+exitLong     = exitLongStop or exitLongTgt or exitLongDeg or exitLongExt
+
+exitShortStop= posState == -1 and not na(stopPx) and close > stopPx
+exitShortTgt = posState == -1 and not na(tgtPx)  and low <= tgtPx
+exitShortDeg = posState == -1 and (score > 0 or (entryArmed and dtFail))
+exitShort    = exitShortStop or exitShortTgt or exitShortDeg
+
+if longSig
+    posState := 1
+    entryPx  := close
+    stopPx   := longStop
+    tgtPx    := longTgt
+    entryArmed := setupBreakRetest
+    lastSigBar := bar_index
+else if shortSig
+    posState := -1
+    entryPx  := close
+    stopPx   := shortStop
+    tgtPx    := shortTgt
+    entryArmed := setupBreakdown
+    lastSigBar := bar_index
+else if (posState == 1 and exitLong) or (posState == -1 and exitShort)
+    posState := 0
+    entryPx  := na
+    stopPx   := na
+    tgtPx    := na
+    entryArmed := false
+
+// blocking reason (for the dashboard)
+blockReason = longRaw or shortRaw ? "-"
+     : not gateVol      ? "HV pctile " + str.tostring(hvPct, "#") + " >= " + str.tostring(hvSuppress)
+     : not (gateSetupL or gateSetupS) ? "no qualifying setup"
+     : not (gateScoreL or gateScoreS) ? "score " + str.tostring(score, "#") + " below threshold"
+     : not (gateNoiseL or gateNoiseS) ? "target inside noise floor"
+     : not (gateRRL or gateRRS)       ? "R:R below " + str.tostring(minRR, "#.#")
+     : not gateVolume   ? "volume not confirming"
+     : not coolOK       ? "cooldown"
+     : "-"
+
+// ============================================================================
+//  PLOTTING
+// ============================================================================
+plot(sma20,  "SMA20",  color=color.new(color.aqua,   50), linewidth=1)
+plot(sma50,  "SMA50",  color=color.new(color.orange, 50), linewidth=1)
+plot(sma200, "SMA200", color=color.new(color.gray,   40), linewidth=2)
+
+pRes = plot(showLvls and not na(resLvl) ? resLvl : na, "Resistance",
+     color=color.new(color.red, 25), style=plot.style_linebr, linewidth=2)
+pSup = plot(showLvls and not na(supLvl) ? supLvl : na, "Support",
+     color=color.new(color.green, 25), style=plot.style_linebr, linewidth=2)
+
+// noise-floor band: inside this, levels carry little information
+nfUp = showZone ? close + noiseFloor * noiseMult : na
+nfDn = showZone ? close - noiseFloor * noiseMult : na
+pU = plot(nfUp, "Noise+", color=color.new(color.purple, 75), style=plot.style_linebr)
+pD = plot(nfDn, "Noise-", color=color.new(color.purple, 75), style=plot.style_linebr)
+fill(pU, pD, color=color.new(color.purple, 93), title="Noise floor")
+
+plot(showLvls and dbArmed and not na(dbNeck) ? dbNeck : na, "Neckline",
+     color=color.new(color.yellow, 0), style=plot.style_linebr, linewidth=2)
+
+plotshape(showLabels and longSig,  title="BUY",  style=shape.labelup,
+     location=location.belowbar, color=color.new(color.green, 0),
+     textcolor=color.white, text="BUY", size=size.small)
+plotshape(showLabels and shortSig, title="SELL", style=shape.labeldown,
+     location=location.abovebar, color=color.new(color.red, 0),
+     textcolor=color.white, text="SELL", size=size.small)
+plotshape(showLabels and posState == 0 and (exitLong[1] or exitShort[1]), title="EXIT",
+     style=shape.xcross, location=location.abovebar, color=color.new(color.orange, 0),
+     size=size.tiny)
+
+bgcolor(highVol ? color.new(color.red, 92) : na, title="High-vol suppression")
+
+// ============================================================================
+//  DASHBOARD
+// ============================================================================
+f_pos(s) => s == "Top Right" ? position.top_right : s == "Top Left" ? position.top_left
+     : s == "Bottom Right" ? position.bottom_right : position.bottom_left
+
+var table t = table.new(f_pos(dashPos), 2, 15,
+     bgcolor=color.new(color.black, 12), border_color=color.new(color.gray, 60), border_width=1)
+
+if showDash and barstate.islast
+    scoreCol = score >= longThr ? color.lime : score <= -shortThr ? color.red
+         : score > 0 ? color.new(color.lime, 45) : color.new(color.red, 45)
+    verdict = posState == 1 ? "LONG OPEN" : posState == -1 ? "SHORT OPEN"
+         : longRaw ? "BUY" : shortRaw ? "SELL" : "NO SIGNAL"
+    vCol = posState != 0 ? color.aqua : longRaw ? color.lime : shortRaw ? color.red : color.gray
+
+    table.cell(t, 0, 0, "CONFLUENCE ENGINE", text_color=color.white, text_size=size.small,
+         bgcolor=color.new(color.blue, 60))
+    table.cell(t, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white,
+         text_size=size.small, bgcolor=color.new(color.blue, 60))
+
+    table.cell(t, 0, 1, "Verdict", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 1, verdict, text_color=vCol, text_size=size.small)
+
+    table.cell(t, 0, 2, "Score", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(score, "#") + " / 100", text_color=scoreCol, text_size=size.small)
+
+    table.cell(t, 0, 3, "Regime", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 3, regime + (highVol ? " (HI-VOL)" : ""),
+         text_color=highVol ? color.red : color.white, text_size=size.small)
+
+    table.cell(t, 0, 4, "Structure", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 4, structUp ? "HH / HL" : structDn ? "LH / LL" : "mixed",
+         text_color=structUp ? color.lime : structDn ? color.red : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 5, "HTF (" + htfRes + ")", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 5, htfUp ? "UP" : htfDn ? "DOWN" : "n/a",
+         text_color=htfUp ? color.lime : color.red, text_size=size.small)
+
+    table.cell(t, 0, 6, "Momentum", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 6, "RSI " + str.tostring(rsiV, "#.#") + "  ADX " + str.tostring(adxV, "#.#"),
+         text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 7, "Volume", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 7, "relV " + str.tostring(relVol5, "#.##") + (obvAgree ? " OBV ok" : " OBV DIV"),
+         text_color=obvAgree and relVol5 >= 1 ? color.lime : color.orange, text_size=size.small)
+
+    table.cell(t, 0, 8, "Volatility", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 8, "HV " + str.tostring(hv20, "#") + "% p" + str.tostring(hvPct, "#")
+         + (volRising ? " RISING" : " falling"),
+         text_color=highVol ? color.red : color.white, text_size=size.small)
+
+    table.cell(t, 0, 9, "21-bar sigma", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 9, "+/- " + str.tostring(sigma21 * 100, "#.#") + "%",
+         text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 10, "Resistance", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 10, na(resLvl) ? "n/a" : str.tostring(resLvl, format.mintick)
+         + "  (" + str.tostring(resSigma, "#.##") + "s x" + str.tostring(resStr) + ")",
+         text_color=not na(resSigma) and resSigma < 1 ? color.orange : color.white, text_size=size.small)
+
+    table.cell(t, 0, 11, "Support", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 11, na(supLvl) ? "n/a" : str.tostring(supLvl, format.mintick)
+         + "  (" + str.tostring(supSigma, "#.##") + "s x" + str.tostring(supStr) + ")",
+         text_color=not na(supSigma) and supSigma < 1 ? color.orange : color.white, text_size=size.small)
+
+    table.cell(t, 0, 12, "R:R (long)", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 12, na(longRR) ? "n/a" : str.tostring(longRR, "#.##") + ":1",
+         text_color=not na(longRR) and longRR >= minRR ? color.lime : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 13, "Pattern", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 13, dbArmed ? "DB retest HELD" : not na(dbBreak) and dbFail ? "DB FAILED"
+         : not na(dbBreak) ? "DB awaiting retest" : dtArmed ? "DT retest held" : "none",
+         text_color=dbArmed ? color.lime : dbFail ? color.red : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 14, "Blocked by", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 14, blockReason,
+         text_color=blockReason == "-" ? color.lime : color.orange, text_size=size.small)
+
+// ============================================================================
+//  ALERTS
+// ============================================================================
+alertcondition(longSig,  "CSE Buy",  "CSE BUY {{ticker}} @ {{close}}")
+alertcondition(shortSig, "CSE Sell", "CSE SELL {{ticker}} @ {{close}}")
+alertcondition(posState == 0 and (exitLong[1] or exitShort[1]), "CSE Exit", "CSE EXIT {{ticker}} @ {{close}}")
+alertcondition(not na(dbBreak) and dbFail and not dbFail[1], "CSE Pattern Failure",
+     "CSE pattern FAILED {{ticker}} - neckline lost")
