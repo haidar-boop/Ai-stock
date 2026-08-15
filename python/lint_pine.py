@@ -74,6 +74,13 @@ for i, ln in enumerate(lines, 1):
         problems.append(f"{i}: negative loop step — Pine requires `by` > 0 and counts "
                         f"down automatically when from > to (RE10021)")
 
+# --- 1c. dynamic historical indexing without max_bars_back -------------------
+code_all = "\n".join(strip_code(l) for l in lines)
+dyn = re.findall(r"\b(?:high|low|close|open|volume)\[([A-Za-z_]\w*)\]", code_all)
+if dyn and "max_bars_back" not in code_all:
+    problems.append(f"dynamic historical index ({sorted(set(dyn))[:3]}) without "
+                    f"max_bars_back in indicator() — Pine may fail to infer the buffer")
+
 # --- 2. invalid multi-declaration / multi-assignment -------------------------
 for i, ln in enumerate(lines, 1):
     body = strip_code(ln)
