@@ -184,6 +184,7 @@ class Config:
     hv_suppress: float = 90.0
     cooldown: int = 10
     use_vol_conf: bool = True
+    enable_shorts: bool = False   # OFF by default: see docs/SHORT_TEST_RESULTS.md
     piv_len: int = 5
     rsi_len: int = 14
     adx_len: int = 14
@@ -303,22 +304,31 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
     ph_arr: list[float] = []
     pl_arr: list[float] = []
     pl_hist: list[tuple[float, int]] = []   # (low, bar) for pair-wise matching
+    ph_hist: list[tuple[float, int]] = []   # (high, bar) — bearish mirror
 
     db_neck = db_base = np.nan
     db_break = None
     db_retest = db_fail = False
     db_born = -10**6            # bar the pattern was formed on
 
+    # bearish mirror: double TOP
+    dt_neck = dt_base = np.nan
+    dt_break = None
+    dt_retest = dt_fail = False
+    dt_born = -10**6
+
     last_sig = -10**6
     pos = 0
     entry = stop = tgt = np.nan
-    entry_armed = False   # was this trade entered on the double-bottom setup?
+    entry_armed = False   # entered on the pattern setup (db for long, dt for short)
 
     cols = {k: np.full(n, np.nan) for k in
             ("score", "res", "sup", "res_sigma", "sup_sigma", "long_rr", "db_neck", "db_target",
-             "plan_stop", "plan_target")}
+             "plan_stop", "plan_target",
+             "short_rr", "dt_neck", "dt_target", "plan_stop_short", "plan_target_short")}
     flags = {k: np.zeros(n, dtype=bool) for k in
-             ("long_sig", "short_sig", "exit_sig", "db_armed", "struct_up", "struct_dn", "high_vol")}
+             ("long_sig", "short_sig", "exit_sig", "db_armed", "dt_armed",
+              "struct_up", "struct_dn", "high_vol")}
     regime_out = np.array(["" for _ in range(n)], dtype=object)
     block_out = np.array(["" for _ in range(n)], dtype=object)
     exit_px_out = np.full(n, np.nan)
@@ -337,6 +347,24 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
             ph1_bar = i - cfg.piv_len
             ph_arr.append(row["ph"])
             ph_arr[:] = ph_arr[-40:]
+            ph_hist.append((float(row["ph"]), ph1_bar))
+            ph_hist[:] = ph_hist[-12:]
+
+            # ---- double-top detection (exact mirror of the bullish scan) -----
+            for k in range(len(ph_hist) - 2, max(-1, len(ph_hist) - 8), -1):
+                prev_val, prev_bar = ph_hist[k]
+                sep = ph1_bar - prev_bar
+                if sep > cfg.db_max_sep:
+                    break
+                if (abs(ph1 - prev_val) / prev_val * 100 <= cfg.db_tol
+                        and sep >= cfg.db_min_sep):
+                    neck_t = d["low"].iloc[max(0, prev_bar):ph1_bar + 1].min()
+                    base_t = max(ph1, prev_val)
+                    if not np.isnan(neck_t) and (base_t - neck_t) / neck_t * 100 >= 5.0:
+                        dt_neck, dt_base = neck_t, base_t
+                        dt_break, dt_retest, dt_fail = None, False, False
+                        dt_born = i
+                    break
         if not np.isnan(row["pl"]) and row["pl"] > 0:
             pl2, pl1 = pl1, row["pl"]
             pl1_bar = i - cfg.piv_len
@@ -402,6 +430,22 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         # broken down as of this bar.
         db_armed = db_break is not None and not db_fail and px > db_neck
         db_target = db_neck + (db_neck - db_base) if not np.isnan(db_neck) else np.nan
+
+        # bearish mirror, same staleness and validity rules
+        if not np.isnan(dt_neck) and dt_break is None and (i - dt_born) > cfg.db_max_sep * 2:
+            dt_neck = dt_base = np.nan
+        if not np.isnan(dt_neck):
+            if dt_break is None and px < dt_neck:
+                dt_break = i
+            elif dt_break is not None:
+                if row["high"] >= dt_neck * (1 - cfg.retest_tol / 100) and i > dt_break:
+                    dt_retest = True
+                if px > dt_neck and i - dt_break <= cfg.fb_window:
+                    dt_fail = True
+                if px > dt_neck * 1.02:
+                    dt_fail = True
+        dt_armed = dt_break is not None and not dt_fail and px < dt_neck
+        dt_target = dt_neck - (dt_base - dt_neck) if not np.isnan(dt_neck) else np.nan
 
         # ---- adaptive levels -------------------------------------------------
         atrv = row["atr"]
@@ -509,9 +553,45 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         g_setup = setup_retest or setup_range_low or setup_pullback or setup_reclaim
         cool_ok = (i - last_sig) >= cfg.cooldown
 
+        # ---- SHORT geometry & gates (exact mirror of the long side) ----------
+        # Target = nearest support that CLEARS the noise floor below; nearest
+        # support alone sits ~0.2 sigma away and could never satisfy the gate.
+        qual_s = [v for v in below if (px - v) >= need]
+        sup_target = (max(qual_s) if qual_s
+                      else (px - max(2.5 * atrv, need) if not np.isnan(atrv) else np.nan))
+        # Stop above structure, never tighter than 1 ATR.
+        struct_stop_s = (res + 0.5 * atrv) if not np.isnan(res) else px + 2.0 * atrv
+        s_stop = max(struct_stop_s, px + 1.0 * atrv)
+        use_dt_tgt = dt_armed and (not np.isnan(dt_target)) and dt_target < px
+        s_tgt = dt_target if use_dt_tgt else sup_target
+        s_risk = s_stop - px
+        s_rew = (px - s_tgt) if not np.isnan(s_tgt) else np.nan
+        s_rr = (s_rew / s_risk) if (not np.isnan(s_rew) and s_risk > 0) else np.nan
+
+        gs_noise = (not np.isnan(s_tgt)) and (px - s_tgt) >= cfg.noise_mult * nf
+        gs_rr = (not np.isnan(s_rr)) and s_rr >= cfg.min_rr
+        # Deliberately stricter than the long threshold: downside range breaks
+        # failed 61.8% of the time in the pattern study.
+        gs_score = (not np.isnan(score)) and score <= -cfg.short_thr
+
+        downtrend_ctx = bool(row["htf_dn"]) or (not np.isnan(row["sma200"])
+                                                and row["sma50"] < row["sma200"])
+        setup_breakdown = dt_armed
+        setup_range_high = (in_range and not np.isnan(rng_hi)
+                            and px >= rng_hi - (rng_hi - rng_lo) * 0.30 and px < rng_hi
+                            and row["rsi"] > 45)
+        setup_rally = (downtrend_ctx and not np.isnan(row["sma50"]) and px < row["sma50"]
+                       and not np.isnan(row["z20"]) and row["z20"] > -0.8
+                       and 38 < row["rsi"] < 65 and px < prev_c)
+        setup_lose_mean = (downtrend_ctx and not np.isnan(row["sma50"]) and px < row["sma50"]
+                           and prev_c >= d["sma50"].iloc[i - 1] if i else False)
+        gs_setup = setup_breakdown or setup_range_high or setup_rally or setup_lose_mean
+
         g_price = px > 0 and np.isfinite(px) and not np.isnan(score)
         long_raw = all([g_price, g_noise, g_rr, g_score, g_vol_regime,
                         g_volume, g_setup, cool_ok])
+        short_raw = cfg.enable_shorts and all([g_price, gs_noise, gs_rr, gs_score,
+                                               g_vol_regime, g_volume, gs_setup, cool_ok])
 
         # ---- blocking reason -------------------------------------------------
         if long_raw:
@@ -541,10 +621,34 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         # fill price is the barrier itself (or the open, when the bar gapped past
         # it) rather than the bar's close.
         long_sig = long_raw and pos <= 0
+        short_sig = short_raw and pos >= 0
         exit_sig = False
         exit_px = np.nan
         exit_reason = ""
-        if pos == 1:
+        if pos == -1:
+            lo_j, hi_j, op_j = row["low"], row["high"], row["open"]
+            # mirror of the long side: symmetric intrabar barriers, adverse
+            # (stop) takes precedence, gap-aware fills
+            hit_stop_s = (not np.isnan(stop)) and hi_j >= stop
+            hit_tgt_s = (not np.isnan(tgt)) and lo_j <= tgt
+            degraded_s = ((not np.isnan(score) and score > 0)
+                          or (dt_fail and entry_armed))
+            extended_s = (not np.isnan(row["z20"]) and row["z20"] < -2.0
+                          and not np.isnan(row["stochk"]) and row["stochk"] < 10
+                          and not np.isnan(row["relvol5"]) and row["relvol5"] < 0.8)
+            if hit_stop_s:
+                exit_px = max(op_j, stop)     # gap through the stop fills at the open
+                exit_reason = "stop"
+                exit_sig = True
+            elif hit_tgt_s:
+                exit_px = min(op_j, tgt)
+                exit_reason = "target"
+                exit_sig = True
+            elif degraded_s or extended_s:
+                exit_px = px
+                exit_reason = "degraded" if degraded_s else "extended"
+                exit_sig = True
+        elif pos == 1:
             lo_j, hi_j, op_j = row["low"], row["high"], row["open"]
             hit_stop = (not np.isnan(stop)) and lo_j <= stop
             hit_tgt = (not np.isnan(tgt)) and hi_j >= tgt
@@ -569,11 +673,22 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
                 exit_reason = "degraded" if degraded else "extended"
                 exit_sig = True
 
+        # A reversal closes the open trade: record it as an exit rather than
+        # silently overwriting the position (the bug fixed on the Pine side).
+        if long_sig or short_sig:
+            if pos != 0 and not exit_sig:
+                exit_px = px
+                exit_reason = "reversal"
+                exit_sig = True
         if long_sig:
             pos, entry, stop, tgt = 1, px, l_stop, l_tgt
             entry_armed = bool(setup_retest)
             last_sig = i
-        elif pos == 1 and exit_sig:
+        elif short_sig:
+            pos, entry, stop, tgt = -1, px, s_stop, s_tgt
+            entry_armed = bool(setup_breakdown)
+            last_sig = i
+        elif pos != 0 and exit_sig:
             pos, entry, stop, tgt = 0, np.nan, np.nan, np.nan
             entry_armed = False
 
@@ -590,6 +705,14 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
                 db_break = None
                 db_retest = False
                 db_fail = False
+        if dt_break is not None:
+            reached_t = (not np.isnan(dt_target)) and row["low"] <= dt_target
+            timed_out_t = (i - dt_break) > cfg.db_max_hold
+            if reached_t or timed_out_t or dt_fail:
+                dt_neck = dt_base = np.nan
+                dt_break = None
+                dt_retest = False
+                dt_fail = False
 
         cols["score"][i] = score
         cols["res"][i], cols["sup"][i] = res, sup
@@ -597,8 +720,13 @@ def run(df: pd.DataFrame, cfg: Config, htf: pd.DataFrame | None = None) -> pd.Da
         cols["long_rr"][i] = l_rr
         # geometry the engine WOULD use if it entered here — defined on every bar
         cols["plan_stop"][i], cols["plan_target"][i] = l_stop, l_tgt
+        cols["short_rr"][i] = s_rr
+        cols["dt_neck"][i], cols["dt_target"][i] = dt_neck, dt_target
+        cols["plan_stop_short"][i], cols["plan_target_short"][i] = s_stop, s_tgt
         cols["db_neck"][i], cols["db_target"][i] = db_neck, db_target
         flags["long_sig"][i] = long_sig
+        flags["short_sig"][i] = short_sig
+        flags["dt_armed"][i] = dt_armed
         flags["exit_sig"][i] = exit_sig
         flags["db_armed"][i] = db_armed
         flags["struct_up"][i], flags["struct_dn"][i] = s_up, s_dn
