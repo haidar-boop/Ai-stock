@@ -17,14 +17,23 @@ including the one that undercuts the tool:
 | Test | Basket | Trades | Edge vs random entry | p-value | Verdict |
 |---|---|---|---|---|---|
 | In-sample | Tech / energy (the design basket) | 173 | **+1.929 pp/trade** (+3.81 sd) | **<0.003** | Entry adds signal |
-| **Out-of-sample** | **14 names never used to design the rules** | **182** | **−0.074 pp/trade** (−0.24 sd) | **0.597** | **Slightly worse than random** |
+| Out-of-sample | 14 names never used to design the rules | 182 | −0.074 pp/trade (−0.24 sd) | 0.597 | No edge |
+| **WIDE TEST** | **294 symbols, 25 years, all 11 sectors** | **10,213** | **+0.048 pp/trade** (+0.97 sd) | **0.168** | **No edge** |
 
-> Regenerated after six rounds of correctness fixes (see *Corrections*). The out-of-sample figure
-> after each round: **+0.206 → +0.014 → +0.245 → +0.069 → −0.057 → −0.074 pp/trade**. It has
-> crossed zero and sits **slightly below random entry**. Every reading is inside noise and the
-> swing between them exceeds the quantity being measured, so the defensible summary is simply:
-> **on symbols the rules were not built on, this engine's entry timing is worth nothing.** Six
-> rounds of fixing — including deleting the design's own headline principle — did not change it.
+**The wide test is the definitive one.** It was
+[pre-registered](docs/WIDE_TEST_PREREGISTRATION.md) before being run, covers **10,213 trades**
+against the previous 182, and is roughly **5× more sensitive** — it can detect an edge as small as
+**0.10 pp/trade**. [Full results](docs/WIDE_TEST_RESULTS.md).
+
+It found none. The 95% confidence interval on the edge is about **−0.05 to +0.15 pp/trade** and
+contains zero. Earlier "no edge" findings could be blamed on an underpowered test; this one
+cannot.
+
+> The small holdout figure moved with every round of bug fixing
+> (**+0.206 → +0.014 → +0.245 → +0.069 → −0.057 → −0.074 pp/trade**) — the swing between readings
+> exceeded the quantity being measured, which is what an underpowered test looks like. The wide
+> test settles it at scale: **on symbols the rules were not built on, this engine's entry timing
+> is worth nothing.**
 
 **The in-sample edge did not survive out-of-sample.** The rules were tuned on the design basket,
 so the in-sample p-value is optimistically biased. Out-of-sample the engine now returns **less
@@ -46,8 +55,11 @@ mean/trade   +2.738%  +1.189%      +0.240%  +0.296%   <-- OOS: BELOW random
 win rate       45.2%    49.9%        29.8%    43.6%   <-- engine wins LESS often, both times
 ```
 
-**The engine wins less often than random entry in both baskets** — by 4.7 and 13.8 points. It is
-a low-hit-rate, large-win profile, and the trade ledger shows exactly that:
+**The engine wins less often than random entry** — and across 10,213 wide-test trades that is now
+a solid structural fact, not noise: **32.5% win rate versus random's 44.2%**, arriving at the same
+mean through rarer, larger wins. **Roughly two thirds of signals lose money.** That is a property
+of the exit rules (tight structural stops, distant targets), not of the entry logic. The trade
+ledger shows the shape:
 
 | Exit reason | n | Median | Mean |
 |---|---|---|---|
@@ -71,6 +83,8 @@ python test_data_layer.py          # regression guard: data-handling correctness
 python validate.py                 # per-symbol signal stats vs baseline
 python randomization_test.py 400   # in-sample: engine vs random entries
 python holdout_test.py 300         # out-of-sample holdout
+python wide_test.py collect        # 294 symbols x 25y (~18 min, cached)
+python wide_test.py analyze 2000   # the definitive pooled test
 ```
 
 ---
@@ -180,6 +194,9 @@ python/validate.py                   signal stats vs per-symbol baselines
 python/randomization_test.py         engine entries vs random entries
 python/holdout_test.py               out-of-sample check on unseen symbols
 docs/METHODOLOGY.md                  the research the rules came from
+docs/WIDE_TEST_PREREGISTRATION.md    criteria fixed BEFORE the definitive test
+docs/WIDE_TEST_RESULTS.md            what it found (no edge), with breakdowns
+python/wide_test.py                  the definitive test: 294 symbols, 25 years
 ```
 
 `engine.py` mirrors the Pine logic bar-for-bar so the rules can be backtested (Pine cannot be
@@ -309,11 +326,13 @@ use-before-declaration, bracket balance), since Pine only compiles inside Tradin
 
 ## Known limitations
 
-- **No out-of-sample entry edge — the current estimate is slightly negative.** See above. Use it
-  as a discipline framework (it enforces volatility-aware targets, R:R minimums, structural stops
-  and regime awareness), not as a source of alpha.
-- **Small samples.** 173 in-sample and 182 out-of-sample trades. Both are too small for strong
-  conclusions in either direction.
+- **No out-of-sample entry edge.** Settled by a pre-registered test over 10,213 trades and 294
+  symbols, powerful enough to detect an edge of 0.1 pp/trade. Use this as a discipline framework
+  — it enforces volatility-aware targets, R:R minimums, structural stops and regime awareness —
+  **not as a source of alpha**. Development of the entry logic has stopped for this reason.
+- **Sample sizes.** The wide test (10,213 trades) is adequate. The two small baskets above
+  (173 / 182 trades) are not, and are retained only to show how the estimate moved during
+  debugging.
 - **Backtests exclude commissions, slippage, and spread**, which would reduce every result.
 - **Bull-market window.** The 10-year study period was mostly a bull market; random entries alone
   returned +0.96%/trade. Bearish regimes are under-represented.

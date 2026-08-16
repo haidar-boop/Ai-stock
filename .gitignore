@@ -4,3 +4,4 @@ __pycache__/
 *.csv
 *.json
 !package.json
+_wide_cache/
