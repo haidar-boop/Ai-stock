@@ -1,0 +1,29 @@
+collect: 305 symbols (universe 305), cache=/home/user/Ai-stock/python/_wide_cache_v2
+  [20/305] ok=20 skip=0 fail=0 (last APA: 6286 bars, 27 signals)
+  [35/305] BK: FAILED HTTPError: HTTP Error 404: Not Found
+  [40/305] ok=39 skip=0 fail=1 (last BSX: 6286 bars, 18 signals)
+  [60/305] ok=59 skip=0 fail=1 (last CNP: 6286 bars, 39 signals)
+  [71/305] DFS: FAILED HTTPError: HTTP Error 404: Not Found
+  [80/305] ok=78 skip=0 fail=2 (last DOV: 6286 bars, 41 signals)
+  [85/305] EA: only 6 bars — skipped
+  [100/305] ok=97 skip=1 fail=2 (last ES: 6284 bars, 38 signals)
+  [120/305] ok=117 skip=1 fail=2 (last GS: 6286 bars, 41 signals)
+  [124/305] HES: FAILED HTTPError: HTTP Error 404: Not Found
+  [126/305] HOLX: FAILED HTTPError: HTTP Error 404: Not Found
+  [138/305] IPG: FAILED HTTPError: HTTP Error 404: Not Found
+  [140/305] ok=134 skip=1 fail=5 (last IR: 2327 bars, 10 signals)
+  [147/305] JNPR: FAILED HTTPError: HTTP Error 404: Not Found
+  [149/305] K: FAILED HTTPError: HTTP Error 404: Not Found
+  [160/305] ok=152 skip=1 fail=7 (last LH: 6286 bars, 44 signals)
+  [180/305] ok=172 skip=1 fail=7 (last MLM: 6286 bars, 27 signals)
+  [181/305] MMC: FAILED HTTPError: HTTP Error 404: Not Found
+  [187/305] MRO: FAILED HTTPError: HTTP Error 404: Not Found
+  [200/305] ok=190 skip=1 fail=9 (last NVR: 6283 bars, 34 signals)
+  [210/305] PARA: only 1382 bars — skipped
+  [220/305] ok=209 skip=2 fail=9 (last PM: 4633 bars, 31 signals)
+  [240/305] ok=229 skip=2 fail=9 (last SLB: 6286 bars, 29 signals)
+  [260/305] ok=249 skip=2 fail=9 (last TGT: 6286 bars, 36 signals)
+  [280/305] ok=269 skip=2 fail=9 (last VRTX: 6286 bars, 35 signals)
+  [300/305] ok=289 skip=2 fail=9 (last XLU: 6286 bars, 43 signals)
+  [305/305] ok=294 skip=2 fail=9 (last ZBRA: 6286 bars, 29 signals)
+collect done: ok=294 skipped=2 failed=9

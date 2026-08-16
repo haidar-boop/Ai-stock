@@ -26,7 +26,7 @@ import pandas as pd
 
 from cse.engine import Config, fetch, run
 
-CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_wide_cache")
+CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_wide_cache_v2")
 HORIZON = 60
 MIN_TAIL = HORIZON + 1
 MIN_BARS = 1500
@@ -71,16 +71,19 @@ _add("Communication", """VZ T TMUS CMCSA CHTR NFLX EA TTWO OMC IPG LYV WBD PARA 
 _add("ETF", """DIA IWM MDY EFA EEM XLF XLV XLP XLY XLI XLB XLU XLRE XLK IYR GLD SLV TLT HYG""")
 
 
-def outcomes_all_bars(d: pd.DataFrame) -> np.ndarray:
+def outcomes_all_bars(d: pd.DataFrame, side: str = "long") -> np.ndarray:
     """Return, for every bar, the trade result of entering there — or NaN if the
-    bar is not eligible. Mirrors randomization_test.simulate() exactly."""
+    bar is not eligible. `side="long"` mirrors randomization_test.simulate()
+    exactly; `side="short"` is its exact mirror (stop above, target below,
+    return measured as (entry-exit)/entry)."""
     c = d["close"].to_numpy(float)
     hi = d["high"].to_numpy(float)
     lo = d["low"].to_numpy(float)
     op = d["open"].to_numpy(float)
     atrv = d["atr"].to_numpy(float)
-    p_stop = d["plan_stop"].to_numpy(float)
-    p_tgt = d["plan_target"].to_numpy(float)
+    long_side = side == "long"
+    p_stop = d["plan_stop" if long_side else "plan_stop_short"].to_numpy(float)
+    p_tgt = d["plan_target" if long_side else "plan_target_short"].to_numpy(float)
     score = d["score"].to_numpy(float)
     z = d["z20"].to_numpy(float)
     sk = d["stochk"].to_numpy(float)
@@ -92,34 +95,55 @@ def outcomes_all_bars(d: pd.DataFrame) -> np.ndarray:
         if not np.isfinite(atrv[e]) or not np.isfinite(c[e]) or c[e] <= 0:
             continue
         px = c[e]
-        stop = p_stop[e] if np.isfinite(p_stop[e]) else px - atrv[e]
-        tgt = p_tgt[e]
-        if not np.isfinite(tgt) or tgt <= px:
-            tgt = px + 2.5 * atrv[e]
-        if stop >= px:
-            stop = px - atrv[e]
+        stop, tgt = p_stop[e], p_tgt[e]
+        if long_side:
+            if not np.isfinite(stop):
+                stop = px - atrv[e]
+            if not np.isfinite(tgt) or tgt <= px:
+                tgt = px + 2.5 * atrv[e]
+            if stop >= px:
+                stop = px - atrv[e]
+        else:
+            if not np.isfinite(stop):
+                stop = px + atrv[e]
+            if not np.isfinite(tgt) or tgt >= px:
+                tgt = px - 2.5 * atrv[e]
+            if stop <= px:
+                stop = px + atrv[e]
         exit_px = c[min(e + HORIZON, n - 1)]
         for j in range(e + 1, min(e + HORIZON + 1, n)):
-            if lo[j] <= stop:
-                exit_px = min(op[j], stop)
-                break
-            if hi[j] >= tgt:
-                exit_px = max(op[j], tgt)
-                break
-            degraded = np.isfinite(score[j]) and score[j] < 0
-            extended = (np.isfinite(z[j]) and z[j] > 2.0
-                        and np.isfinite(sk[j]) and sk[j] > 90
-                        and np.isfinite(rv[j]) and rv[j] < 0.8)
+            if long_side:
+                if lo[j] <= stop:
+                    exit_px = min(op[j], stop)
+                    break
+                if hi[j] >= tgt:
+                    exit_px = max(op[j], tgt)
+                    break
+                degraded = np.isfinite(score[j]) and score[j] < 0
+                extended = (np.isfinite(z[j]) and z[j] > 2.0
+                            and np.isfinite(sk[j]) and sk[j] > 90
+                            and np.isfinite(rv[j]) and rv[j] < 0.8)
+            else:
+                if hi[j] >= stop:                       # adverse first
+                    exit_px = max(op[j], stop)
+                    break
+                if lo[j] <= tgt:
+                    exit_px = min(op[j], tgt)
+                    break
+                degraded = np.isfinite(score[j]) and score[j] > 0
+                extended = (np.isfinite(z[j]) and z[j] < -2.0
+                            and np.isfinite(sk[j]) and sk[j] < 10
+                            and np.isfinite(rv[j]) and rv[j] < 0.8)
             if degraded or extended:
                 exit_px = c[j]
                 break
-        out[e] = (exit_px / px - 1) * 100
+        out[e] = ((exit_px / px - 1) if long_side else (1 - exit_px / px)) * 100
     return out
 
 
 def collect(start: int = 0, end: int | None = None) -> None:
     os.makedirs(CACHE, exist_ok=True)
-    cfg = Config()
+    cfg = Config(enable_shorts=True)   # measure them; the default stays off
     syms = sorted(UNIVERSE)[start:end]
     print(f"collect: {len(syms)} symbols (universe {len(UNIVERSE)}), cache={CACHE}", flush=True)
     ok = skip = fail = 0
@@ -137,13 +161,17 @@ def collect(start: int = 0, end: int | None = None) -> None:
                 continue
             wk = fetch(s, "25y", "1wk")
             d = run(d1, cfg, htf=wk)
-            out = outcomes_all_bars(d)
+            out = outcomes_all_bars(d, "long")
             sig = d["long_sig"].to_numpy(bool)
+            out_s = outcomes_all_bars(d, "short")
+            sig_s = d["short_sig"].to_numpy(bool)
             lr = np.log(d["close"] / d["close"].shift()).replace([np.inf, -np.inf], np.nan)
             annvol = float(lr.std(ddof=1) * np.sqrt(252) * 100)
             years = d["dt"].dt.year.to_numpy()
             np.savez_compressed(
-                path, outcome=out.astype(np.float32), signal=sig, year=years.astype(np.int16),
+                path, outcome=out.astype(np.float32), signal=sig,
+                outcome_short=out_s.astype(np.float32), signal_short=sig_s,
+                year=years.astype(np.int16),
                 sector=UNIVERSE[s], annvol=annvol, bars=len(d1),
                 prior_holdout=bool(s in PRIOR_HOLDOUT), insufficient=False,
             )
@@ -168,24 +196,32 @@ def _load() -> list[dict]:
             continue
         rows.append(dict(
             sym=f[:-4], outcome=z["outcome"].astype(float), signal=z["signal"],
+            outcome_short=z["outcome_short"].astype(float), signal_short=z["signal_short"],
             year=z["year"], sector=str(z["sector"]), annvol=float(z["annvol"]),
             prior_holdout=bool(z["prior_holdout"]),
         ))
     return rows
 
 
-def _randtest(data: list[dict], iters: int = 2000, seed: int = 7) -> dict:
-    """Engine entries vs random entries drawn from the same eligible bars."""
+def _randtest(data: list[dict], iters: int = 2000, seed: int = 7,
+              side: str = "long") -> dict:
+    """Engine entries vs random entries drawn from the same eligible bars.
+
+    For side="short" the random arm SHORTS the same bars, so the upward drift
+    headwind applies identically to both arms and cancels from the comparison.
+    """
+    okey = "outcome" if side == "long" else "outcome_short"
+    skey = "signal" if side == "long" else "signal_short"
     rng = np.random.default_rng(seed)
     real, pools, counts = [], [], []
     for r in data:
-        elig = np.isfinite(r["outcome"])
-        s = r["signal"] & elig
+        elig = np.isfinite(r[okey])
+        s = r[skey] & elig
         k = int(s.sum())
         if k == 0:
             continue
-        real.append(r["outcome"][s])
-        pools.append(r["outcome"][elig])
+        real.append(r[okey][s])
+        pools.append(r[okey][elig])
         counts.append(k)
     if not real:
         return {}
@@ -243,6 +279,25 @@ def analyze(iters: int = 2000) -> None:
         print(f"\n  PRE-REGISTERED VERDICT: {verdict}")
         print(f"  engine win rate {main['real_win']:.1f}%  vs random {main['rand_win']:.1f}%")
         print(f"  smallest edge this test could detect (~2sd): {2*main['rand_sd']:.3f} pp/trade")
+
+    # ---------------- SHORT SIDE ----------------
+    tot_s = sum(int((d["signal_short"] & np.isfinite(d["outcome_short"])).sum()) for d in data)
+    print(f"\n### SHORT SIDE (confirmatory) — {tot_s} short signals ###")
+    print("Pre-registered in docs/SHORT_TEST_PREREGISTRATION.md")
+    print("Random arm SHORTS the same bars, so the upward-drift headwind cancels.")
+    sh = _randtest(data, iters, side="short")
+    print(_line("ALL SYMBOLS (short)", sh))
+    shc = _randtest([d for d in data if not d["prior_holdout"]], iters, side="short")
+    print(_line("excl. prior holdout", shc))
+    if sh:
+        p, e = sh["p"], sh["edge"]
+        v = ("A — REAL EDGE" if (p < 0.01 and e >= 0.10)
+             else "B — NO EDGE (p>=0.05)" if p >= 0.05
+             else "C — INCONCLUSIVE / economically trivial")
+        print(f"\n  PRE-REGISTERED VERDICT (short): {v}")
+        print(f"  engine short win rate {sh['real_win']:.1f}%  vs random short {sh['rand_win']:.1f}%")
+        print(f"  smallest edge detectable (~2sd): {2*sh['rand_sd']:.3f} pp/trade")
+        print(f"  NOTE absolute returns are expected NEGATIVE for both arms (equity drift).")
 
     print("\n### SECONDARY — EXPLORATORY ONLY, not evidence ###")
     print("\n-- by sector --")

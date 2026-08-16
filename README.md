@@ -18,7 +18,8 @@ including the one that undercuts the tool:
 |---|---|---|---|---|---|
 | In-sample | Tech / energy (the design basket) | 173 | **+1.929 pp/trade** (+3.81 sd) | **<0.003** | Entry adds signal |
 | Out-of-sample | 14 names never used to design the rules | 182 | −0.074 pp/trade (−0.24 sd) | 0.597 | No edge |
-| **WIDE TEST** | **294 symbols, 25 years, all 11 sectors** | **10,213** | **+0.048 pp/trade** (+0.97 sd) | **0.168** | **No edge** |
+| **WIDE TEST (long)** | **294 symbols, 25 years, all 11 sectors** | **10,213** | **+0.048 pp/trade** (+0.97 sd) | **0.168** | **No edge** |
+| **WIDE TEST (short)** | same universe, vs *random shorts* | **955** | **−0.382 pp/trade** (−2.22 sd) | **0.985** | **Worse than random** |
 
 **The wide test is the definitive one.** It was
 [pre-registered](docs/WIDE_TEST_PREREGISTRATION.md) before being run, covers **10,213 trades**
@@ -28,6 +29,13 @@ against the previous 182, and is roughly **5× more sensitive** — it can detec
 It found none. The 95% confidence interval on the edge is about **−0.05 to +0.15 pp/trade** and
 contains zero. Earlier "no edge" findings could be blamed on an underpowered test; this one
 cannot.
+
+**The short side is worse.** Also [pre-registered](docs/SHORT_TEST_PREREGISTRATION.md), with the
+random arm shorting the same bars so the drift headwind cancels. Engine shorts averaged
+**−0.711%/trade against random shorts' −0.329%**, winning only **20.3%** of the time versus 39.6%,
+and were worse than random on **58% of individual symbols**.
+[Full results](docs/SHORT_TEST_RESULTS.md). Short signals ship **disabled**, labelled *measured and
+worse than random* — not merely untested.
 
 > The small holdout figure moved with every round of bug fixing
 > (**+0.206 → +0.014 → +0.245 → +0.069 → −0.057 → −0.074 pp/trade**) — the swing between readings
@@ -196,6 +204,8 @@ python/holdout_test.py               out-of-sample check on unseen symbols
 docs/METHODOLOGY.md                  the research the rules came from
 docs/WIDE_TEST_PREREGISTRATION.md    criteria fixed BEFORE the definitive test
 docs/WIDE_TEST_RESULTS.md            what it found (no edge), with breakdowns
+docs/SHORT_TEST_PREREGISTRATION.md   short-side criteria, fixed in advance
+docs/SHORT_TEST_RESULTS.md           shorts measured: worse than random
 python/wide_test.py                  the definitive test: 294 symbols, 25 years
 ```
 
@@ -341,7 +351,9 @@ use-before-declaration, bracket balance), since Pine only compiles inside Tradin
 - **Not compiled in CI.** The Pine file is hand-reviewed and passes `python/lint_pine.py`, but
   Pine only compiles inside TradingView, so it has never been run. This is the largest unretired
   risk in the repository. Report any compile error and it will be fixed.
-- **The short path is unvalidated** and disabled by default. All published figures are long-only.
+- **The short path was measured and performs worse than random** (−0.382 pp/trade, 20.3% win
+  rate). It ships disabled. Shorting additionally carries unlimited loss, borrow costs, margin
+  calls and squeeze risk that no backtest here models — real results would be worse still.
 - Yahoo Finance data has known defects (spurious partial weekly bars, occasional duplicated
   volume, missing volume, and WTI's negative 2020-04-20 print). All of these are now handled in
   `engine.py` and pinned by `python/test_data_layer.py`; see `docs/METHODOLOGY.md` for detail.

@@ -58,8 +58,8 @@ hvSuppress = input.int(90,  "Suppress above HV percentile",minval=50, maxval=100
      tooltip="No signals when 20-bar historical volatility is above this percentile of its own 1y range.")
 coolDown   = input.int(10,  "Cooldown bars between signals",minval=0, maxval=100, group=grpS)
 useVolConf = input.bool(true,"Require volume confirmation", group=grpS)
-enableShorts = input.bool(false, "Enable SHORT signals (UNVALIDATED)", group=grpS,
-     tooltip="Off by default. The Python mirror used for all published backtests implements no short side, so the short path has never been scored against random entry. Separately, downside range breaks failed 61.8% of the time in the pattern study. Treat any SELL as experimental.")
+enableShorts = input.bool(false, "Enable SHORT signals (MEASURED: WORSE THAN RANDOM)", group=grpS,
+     tooltip="Off by default, and not because it is untested - because it was tested and failed. Across 955 short signals on 294 symbols over 25 years, these shorts averaged -0.711% per trade against -0.329% for RANDOMLY chosen shorts on the same bars, winning only 20.3% of the time versus 39.6%. They were worse than random on 58% of individual symbols. See docs/SHORT_TEST_RESULTS.md. Shorting also carries unlimited loss, borrow costs, margin calls and squeeze risk that the backtest does not model. There is no defensible reason to enable this.")
 
 grpT = "Technical Parameters"
 pivLen     = input.int(5,   "Pivot lookback",              minval=2, maxval=20, group=grpT)
